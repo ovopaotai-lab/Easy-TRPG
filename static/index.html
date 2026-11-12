@@ -1,0 +1,1553 @@
+<!DOCTYPE html>
+<html lang="zh-CN" translate="no">
+<head>
+  <meta charset="UTF-8">
+  <meta name="google" content="notranslate">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0d0f17">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%B2%3C/text%3E%3C/svg%3E">
+  <title>AI 跑团 (alpha 1.4)</title>
+  <link rel="stylesheet" href="/static/style.css?v=27.3">
+  <script src="/static/marked.min.js"></script>
+</head>
+<body class="dark-theme desktop-sidebar-collapsed">
+  <!-- 侧边栏背景遮罩（点击自动收起侧边抽屉） -->
+  <div id="sidebarBackdrop" class="sidebar-backdrop" style="display: none;"></div>
+
+  <!-- 登录全屏覆盖层（纯净版已关闭账号系统，默认隐藏） -->
+  <div id="loginOverlay" class="login-overlay" style="display: none !important;">
+    <div class="login-card">
+      <div class="login-header">
+        <div class="login-logo-ring"></div>
+        <h2>AI 跑团</h2>
+      </div>
+      <form id="loginForm" class="login-form" autocomplete="on">
+        <input type="text" id="loginUsername" class="form-input" value="player" />
+        <input type="password" id="loginPassword" class="form-input" value="player" />
+        <button type="button" id="btnTogglePwdVis"></button>
+        <div id="loginError" class="login-error-msg" style="display: none;"></div>
+        <button type="submit" id="btnLoginSubmit"></button>
+      </form>
+    </div>
+  </div>
+
+  <!-- 主应用工作台框架（免登录直接进入，默认单页全屏） -->
+  <div class="app-layout" id="appLayout" style="display: flex;">
+    <!-- 左侧抽屉栏（默认收起，点击左上角 [面板] 滑出） -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <!-- 角色卡库 -->
+        <button id="btnHeaderCharCardSettings" class="btn btn-secondary btn-sidebar-charcard" type="button" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openCharCardSettingsModal && window.openCharCardSettingsModal()">
+          <span></span> 角色卡库
+        </button>
+
+        <!-- 新建 / 高级新建 -->
+        <div class="enterprise-nav-grid">
+          <button type="button" class="ent-nav-btn active" id="btnNewProject">
+            <span>+</span> 新建
+          </button>
+          <button type="button" class="ent-nav-btn" id="btnNavExplore" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openExploreModal && window.openExploreModal()">
+            <span></span> 高级新建
+          </button>
+        </div>
+
+        <!-- 剧本列表 -->
+        <div id="projectPillsList" class="project-pills-list"></div>
+
+        <!-- 剧本列表/对话列表分割条（隐藏） -->
+        <div id="resizerSidebarProjects" class="pane-resizer pane-resizer-h" style="display:none !important;">
+          <span class="resizer-grip-dots"></span>
+        </div>
+
+        <!-- 新建对话 -->
+        <button id="btnNewChat" class="btn btn-primary btn-new-chat" type="button">
+          <span></span> 新建对话
+        </button>
+      </div>
+
+      <!-- 会话分支列表 -->
+      <div class="chat-list-container">
+        <div class="list-title-row">
+          <span class="list-title">存档</span>
+          <span id="chatCountBadge" class="chat-count">0</span>
+        </div>
+        <div id="chatList" class="chat-list"></div>
+      </div>
+
+      <!-- 侧栏底部系统菜单（模型设置与下载模型位于系统设置正上方） -->
+      <div class="sidebar-footer" style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="display: flex; gap: 6px;">
+          <button id="btnOpenModelSettings" class="btn btn-secondary footer-btn" style="flex:1;" type="button" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openModelSettingsModal && window.openModelSettingsModal()">
+            <span></span> 模型
+          </button>
+          <button id="btnOpenHfDownloader" class="btn btn-secondary footer-btn" style="flex:1;color:#38bdf8;border-color:rgba(56,189,248,0.35);background:rgba(56,189,248,0.08);" type="button" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openModelSettingsModal && window.openModelSettingsModal('hf')">
+            <span></span> 下载
+          </button>
+        </div>
+        <button id="btnOpenSettings" class="btn btn-secondary footer-btn" type="button">
+          <span></span> 设置
+        </button>
+      </div>
+    </aside>
+
+    <!-- 隐藏分屏拖拽分割条（极简模式下使用抽屉式覆盖） -->
+    <div id="resizerSidebar" class="pane-resizer pane-resizer-v" style="display: none !important;">
+      <span class="resizer-grip-line"></span>
+    </div>
+
+    <!-- 剧本设定面板（默认隐藏） -->
+    <section id="studioWorkbenchPane" class="studio-workbench-pane" style="display: none;"></section>
+
+    <div id="resizerStudio" class="pane-resizer pane-resizer-v" style="display: none !important;">
+      <span class="resizer-grip-line"></span>
+    </div>
+
+    <!-- 主对话区 -->
+    <main class="chat-main" id="chatMainStage">
+      <!-- 顶栏：面板 | 剧本名 + 对话名 | 模型 + 语言 + 更多 -->
+      <header class="main-header minimalist-header">
+        <div class="header-left">
+          <button id="btnToggleMobileMenu" class="btn btn-sm btn-minimal-drawer" type="button" onclick="window.toggleDesktopSidebar && window.toggleDesktopSidebar(event)">
+            <span>面板</span>
+          </button>
+        </div>
+
+        <div class="header-center">
+          <button id="activeProjectBadge" class="project-badge" type="button" title="剧本设定">
+            <span class="badge-icon"></span>
+            <span id="activeProjectName">默认剧本</span>
+          </button>
+          <div class="title-wrapper" id="titleClickArea" title="重命名">
+            <h3 id="currentChatTitle" class="chat-title">未命名对话</h3>
+            <button id="btnRenameChat" class="icon-btn header-rename-btn" type="button" style="display:none !important;"></button>
+          </div>
+          <!-- 兼容保留隐藏节点，防止老事件绑定报错 -->
+          <button id="btnSidebarPricing" type="button" style="display:none !important;"></button>
+        </div>
+
+        <div class="header-right">
+          <button id="headerContextPill" class="header-context-pill" type="button" onclick="window.toggleHeaderContextPopover && window.toggleHeaderContextPopover(event)" title="当前活跃记忆 / 上下文上限（点击查看详情或手动压缩）">
+            <span class="ctx-pill-dot"></span>
+            <span id="headerContextPillText">0 / 96k</span>
+          </button>
+          <div class="model-badge minimalist-model-pill">
+            
+            <span class="model-pill-label" style="font-size:12px;font-weight:700;color:#6ee7b7;white-space:nowrap;flex-shrink:0;">模型</span>
+            <select id="headerModelSelect" class="header-model-dropdown" aria-label="模型"></select>
+          </div>
+          <button id="btnHeaderLangSwitch" class="icon-tool-btn highlight" type="button" onclick="window.toggleLanguageMenu && window.toggleLanguageMenu(event)" title="Switch Language / 切换语言" style="font-weight:600;padding:5px 10px;border-radius:9px;white-space:nowrap;">
+            <span class="lang-btn-label">Language</span>
+          </button>
+          <button id="btnMobileMoreActions" class="icon-btn mobile-more-trigger" type="button" title="更多" aria-label="更多" aria-haspopup="true">⋯</button>
+        </div>
+
+        <!-- 右上角轻量下拉菜单 -->
+        <div id="mobileMoreMenu" class="mobile-more-menu" style="display: none;">
+          <button class="mobile-menu-item" type="button" onclick="window.openModelSettingsModal && window.openModelSettingsModal()">
+            模型
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="window.toggleStudioWorkbench && window.toggleStudioWorkbench(true)">
+            剧本设定
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="window.openCharCardSettingsModal && window.openCharCardSettingsModal()">
+            角色卡库
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="window.openGalleryModal && window.openGalleryModal()">
+            素材图库
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="document.getElementById('btnToggleSummary')?.click()">
+            前情备忘
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="window.openPromptLogModal && window.openPromptLogModal()">
+            日志
+          </button>
+          <button class="mobile-menu-item" id="btnMobileOpenPricing" type="button">
+            模型价格
+          </button>
+          <button class="mobile-menu-item" id="btnMobileTriggerSummary" type="button">
+            压缩上下文
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="window.toggleLanguageMenu && window.toggleLanguageMenu(event)">
+            语言
+          </button>
+          <button class="mobile-menu-item" id="btnMobileOpenSettings" type="button">
+            设置
+          </button>
+          <button class="mobile-menu-item" id="btnMobileOpenRemote" type="button" style="display:none !important;"></button>
+          <button class="mobile-menu-item" id="btnMobileOpenUser" type="button" style="display:none !important;"></button>
+          <button class="mobile-menu-item text-danger" id="btnMobileLogout" type="button" style="display:none !important;"></button>
+        </div>
+      </header>
+
+      <!-- 动态输入变量快捷栏 -->
+      <div id="chatVariablesBar" class="chat-variables-bar" style="display: none;"></div>
+
+      <!-- 全屏沉浸舞台区域 -->
+      <div class="message-container" id="messageContainer">
+        <!-- 空对话引导 -->
+        <div class="welcome-box" id="welcomeBox" style="background:transparent;border:none;box-shadow:none;">
+          <div style="display:flex;justify-content:center;align-items:center;gap:24px;flex-wrap:wrap;padding:24px 0;">
+            <button type="button" onclick="window.enterInitialGameMode && window.enterInitialGameMode('proj_default', event)" style="min-width:180px;padding:32px 48px;border-radius:16px;border:1px solid rgba(99,102,241,0.45);background:linear-gradient(145deg, rgba(99,102,241,0.14), rgba(15,23,42,0.65));color:#e0e7ff;font-size:1.5rem;font-weight:800;letter-spacing:0.12em;cursor:pointer;">跑团</button>
+            <button type="button" onclick="window.enterInitialGameMode && window.enterInitialGameMode('proj_free_chat', event)" style="min-width:180px;padding:32px 48px;border-radius:16px;border:1px solid rgba(16,185,129,0.45);background:linear-gradient(145deg, rgba(16,185,129,0.14), rgba(15,23,42,0.65));color:#d1fae5;font-size:1.5rem;font-weight:800;letter-spacing:0.12em;cursor:pointer;">聊天</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 悬浮回到底部按钮 -->
+      <button id="btnScrollBottom" class="scroll-bottom-pill" type="button" style="display: none;">
+        <span>最新</span>
+      </button>
+
+      <!-- 可折叠前情备忘抽屉 -->
+      <div id="summaryCard" class="summary-card" style="display: none;">
+        <div id="resizerSummary" class="pane-resizer pane-resizer-h summary-top-resizer" style="display:none !important;">
+          <span class="resizer-grip-dots"></span>
+        </div>
+        <div class="summary-card-header">
+          <div class="summary-card-title">
+            
+            <b>前情备忘</b>
+          </div>
+          <div class="summary-card-tools" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <select id="summaryAiModelSelect" class="form-select ai-assist-model-select" style="display:none;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)"></select>
+            <button id="btnRetriggerSummaryCard" class="btn btn-xs btn-primary" type="button" onclick="window.handleManualSummarize && window.handleManualSummarize()">总结</button>
+            <button id="btnEditSummary" class="btn btn-xs btn-secondary" type="button">编辑</button>
+            <button id="btnCloseSummaryCard" class="btn btn-xs btn-outline-secondary" type="button">收起</button>
+          </div>
+        </div>
+        <div id="summaryText" class="summary-text markdown-body"></div>
+        <div id="summaryEditBox" class="summary-edit-box" style="display: none;">
+          <textarea id="summaryEditTextarea" class="form-textarea" rows="5" placeholder="剧情与角色状态"></textarea>
+          <div class="summary-edit-actions">
+            <button id="btnCancelSummaryEdit" class="btn btn-xs btn-secondary" type="button">取消</button>
+            <button id="btnSaveSummaryEdit" class="btn btn-xs btn-primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- iMessage 极简底栏：仅保留 [传图/选卡] + [输入框] + [发送] -->
+      <footer class="input-area-wrapper minimalist-footer">
+        <input type="file" id="fileInput" accept="image/*" multiple style="position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;" />
+
+        <div class="input-bar-container minimalist-input-capsule" style="position: relative;">
+          <!-- 隐藏式百宝箱气泡菜单（点击 展开传图/角色卡/图库/备忘/上下文监控/日志） -->
+          <div id="minimalistPlusPopover" class="minimalist-plus-popover" style="display: none;">
+            <div class="plus-popover-grid">
+              <label for="fileInput" class="plus-popover-item" id="wrapTriggerUpload" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover()">
+                <span>上传图片</span>
+              </label>
+              <button class="plus-popover-item" id="btnOpenCharCardModal" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover(); window.openCharCardPickerModal && window.openCharCardPickerModal()">
+                <span>角色卡 <small id="charCardCountBadge" class="toolbar-count-pill">0</small></span>
+              </button>
+              <button class="plus-popover-item" id="btnOpenGalleryModal" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover(); window.openGalleryModal && window.openGalleryModal()">
+                <span>素材图库 <small id="galleryCountBadge" class="toolbar-count-pill">0</small></span>
+              </button>
+              <button class="plus-popover-item" id="btnToggleSummary" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover()">
+                <span>前情备忘 <span id="summaryDot" class="badge-dot" style="display: none;"></span></span>
+              </button>
+              <button class="plus-popover-item" id="btnOpenPromptLog" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover(); window.openPromptLogModal && window.openPromptLogModal()">
+                <span>日志</span>
+              </button>
+              <button class="plus-popover-item" id="btnRegenerateLatest" type="button" style="display: none;" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover()">
+                <span>重生成</span>
+              </button>
+            </div>
+            <!-- 收纳在百宝箱底部的上下文进度条与一键压缩 -->
+            <div class="context-meter-group" id="contextMeterGroup" style="margin-top:8px;width:100%;justify-content:space-between;">
+              <div class="context-meter-bar-col" style="flex:1;">
+                <div class="context-meter-top">
+                  <span class="context-meter-label">上下文</span>
+                  <span class="context-meter-val" id="contextMeterText">0 / 32 条</span>
+                </div>
+                <div class="context-meter-track">
+                  <div class="context-meter-fill" id="contextMeterFill" style="width: 0%;"></div>
+                </div>
+              </div>
+              <select id="compressAiModelSelect" class="form-select ai-assist-model-select context-compress-model-select" style="display:none;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)"></select>
+              <button id="btnTriggerSummary" class="toolbar-btn btn-compress-context" type="button">
+                <span>压缩</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 待发送角色卡预览栏（内嵌于输入胶囊顶部） -->
+          <div id="charCardPreviewBar" class="image-preview-bar charcard-preview-bar" style="display: none;">
+            <div id="charCardPreviewList" class="image-preview-list" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;"></div>
+            <div class="image-preview-meta">
+              <span id="charCardPreviewCountHint" class="preview-hint">已选 0 张角色卡</span>
+              <button id="btnClearAllCharCards" class="btn-clear-images" type="button" onclick="window.clearAllSelectedCharCards && window.clearAllSelectedCharCards()">清空</button>
+            </div>
+          </div>
+
+          <!-- 待发送多图预览栏（内嵌于输入胶囊顶部） -->
+          <div id="imagePreviewBar" class="image-preview-bar" style="display: none;">
+            <div id="imagePreviewList" class="image-preview-list"></div>
+            <div class="image-preview-meta">
+              <span id="previewCountHint" class="preview-hint">已选 0 张图片</span>
+              <button id="btnClearAllImages" class="btn-clear-images" type="button">清空</button>
+            </div>
+          </div>
+
+          <div id="resizerInputArea" style="display:none !important;"></div>
+          <div class="input-box-row minimalist-capsule-row">
+            <button type="button" id="btnTogglePlusPopover" class="minimalist-plus-btn" onclick="window.toggleMinimalistPlusPopover && window.toggleMinimalistPlusPopover(event)" title="更多">
+              <span>+</span>
+            </button>
+            <textarea
+              id="userInput"
+              rows="1"
+              placeholder="输入行动或对白..."
+            ></textarea>
+            <div class="send-action-stack minimalist-send-wrap">
+              <button id="btnSend" class="btn btn-primary send-btn minimalist-send-btn" type="button">
+                <span>发送</span>
+              </button>
+              <button id="btnStop" class="btn btn-danger stop-btn minimalist-send-btn" type="button" style="display: none;">
+                <span>停止</span>
+              </button>
+              <button id="btnRollD100" class="minimalist-dice-btn" type="button" title="掷骰 1-100（再按一次可重新掷骰）">
+                <span>🎲</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- ================= 模态弹窗1：素材图库 ================= -->
+  <div id="galleryModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>素材图库</h3>
+        <button class="modal-close" id="btnCloseGalleryModal" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="gallery-top-bar">
+          <div class="gallery-stats">
+            共 <b id="galleryTotalCount">0</b> 张图片
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+            <button type="button" class="btn btn-sm btn-secondary" id="btnDeduplicateGallery" onclick="window.handleDeduplicateGallery && window.handleDeduplicateGallery()">
+              去重
+            </button>
+            <label for="galleryFileInput" class="btn btn-sm btn-secondary upload-to-gallery-btn" id="wrapTriggerGalleryUpload">
+              <span>上传图片</span>
+            </label>
+          </div>
+          <input type="file" id="galleryFileInput" accept="image/*" multiple style="position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;" />
+        </div>
+        <div id="galleryGrid" class="gallery-grid"></div>
+        <div id="galleryEmptyHint" class="gallery-empty" style="display: none;">
+          <div class="empty-title">暂无图片</div>
+        </div>
+      </div>
+      <div class="modal-footer space-between">
+        <div class="gallery-select-status">
+          已选 <span id="gallerySelectedCount" class="highlight-count">0</span> 张
+        </div>
+        <div class="modal-footer-right">
+          <button id="btnSelectAllGallery" class="btn btn-secondary btn-sm" type="button">全选</button>
+          <button id="btnClearSelectionGallery" class="btn btn-secondary btn-sm" type="button">取消选择</button>
+          <button id="btnInsertSelectedImages" class="btn btn-primary btn-sm" type="button">
+            导入所选
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗2：剧本设定 ================= -->
+  <div id="projectModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>剧本设定</h3>
+        <button class="modal-close" id="btnCloseProjectModal" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="projNameInput"><b>名称</b></label>
+          <input type="text" id="projNameInput" class="form-input" placeholder="剧本名称" />
+        </div>
+
+        <div class="form-group">
+          <label class="group-label" for="projSystemInput">
+            <span><b>提示词</b></span>
+          </label>
+          <textarea id="projSystemInput" class="form-textarea" rows="7" placeholder="输入提示词..."></textarea>
+        </div>
+
+        <div class="form-row two-cols">
+          <div class="form-group">
+            <label class="group-label" for="projPrefixInput">
+              <span><b>前置提示词</b></span>
+            </label>
+            <textarea id="projPrefixInput" class="form-textarea" rows="2" placeholder="附加在发言开头"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="group-label" for="projSuffixInput">
+              <span><b>后置提示词</b></span>
+            </label>
+            <textarea id="projSuffixInput" class="form-textarea" rows="2" placeholder="附加在发言末尾"></textarea>
+          </div>
+        </div>
+
+        <div class="form-group context-setting-card">
+          <div class="context-header">
+            <b>上下文</b>
+          </div>
+          <div class="context-body">
+            <div class="form-row-align">
+              <label for="projContextTurnsInput">上下文轮数</label>
+              <input type="number" id="projContextTurnsInput" class="form-input input-narrow" min="4" max="60" value="12" />
+              <span>轮（<b id="turnsCalcHint">24</b> 条消息）</span>
+            </div>
+            <label class="checkbox-row">
+              <input type="checkbox" id="projAutoSummarizeInput" checked />
+              <span>超限自动压缩</span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer space-between">
+        <button id="btnDeleteCurrentProject" class="btn btn-danger btn-sm" type="button">删除剧本</button>
+        <div class="modal-footer-right">
+          <button id="btnSaveProject" class="btn btn-primary" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗2.5：极简模型设置（含 4 项：模型列表 / 本地与指定路径 / 下载模型(HF) / API + 单模型最高优先级独立参数） ================= -->
+  <div id="modelSettingsModal" class="modal-overlay" style="display: none; z-index: 2600;">
+    <div class="modal-card modal-lg" style="max-width: 820px;">
+      <div class="modal-header">
+        <h3>模型</h3>
+        <button class="modal-close" id="btnCloseModelSettingsModal" type="button" onclick="document.getElementById('modelSettingsModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
+        <!-- 顶部四合一分段导航栏：模型列表 | 本地/指定路径 | 下载模型(HF) | API -->
+        <div class="model-settings-tabs-bar">
+          <button type="button" id="modelTabBtn_list" class="model-tab-seg-btn active" onclick="window.switchModelSettingsTab('list')">
+            列表
+          </button>
+          <button type="button" id="modelTabBtn_local" class="model-tab-seg-btn" onclick="window.switchModelSettingsTab('local')">
+            本地
+          </button>
+          <button type="button" id="modelTabBtn_hf" class="model-tab-seg-btn" onclick="window.switchModelSettingsTab('hf')">
+            下载
+          </button>
+          <button type="button" id="modelTabBtn_api" class="model-tab-seg-btn" onclick="window.switchModelSettingsTab('api')">
+            API
+          </button>
+        </div>
+
+        <!-- 隐藏兼容旧版 DOM 节点 -->
+        <div style="display:none !important;">
+          <select id="settingModelSelect"></select>
+          <div id="selectedModelPriceHint"></div>
+          <input type="checkbox" id="chkCustomModel" />
+          <input type="text" id="settingModel" />
+          <button id="btnSettingsOpenPricing" type="button"></button>
+          <button id="btnRefreshModels" type="button"></button>
+          <select id="settingLocalMode">
+            <option value="auto" selected>auto</option>
+            <option value="manual">manual</option>
+          </select>
+        </div>
+
+        <!-- ================= Tab 1: 模型列表（显示已检测到的本地 AI 与 API 接口 + 单模型独立参数入口） ================= -->
+        <div id="modelTabPane_list" class="model-tab-pane" style="display:flex;flex-direction:column;gap:12px;">
+          <!-- 模型列表主视图 -->
+          <div id="modelListMainView" style="display:flex;flex-direction:column;gap:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+              <input type="text" id="minimalistModelSearchInput" class="form-input" style="flex:1;min-width:0;padding:7px 12px;font-size:13px;" placeholder="搜索模型..." oninput="window.renderMinimalistModelList && window.renderMinimalistModelList()" />
+              <button type="button" id="btnMinimalistRefreshModels" class="btn btn-sm btn-secondary" style="flex-shrink:0;" onclick="window.refreshMinimalistModelList && window.refreshMinimalistModelList()">
+                刷新
+              </button>
+            </div>
+            <div id="minimalistModelListContainer" style="display:flex;flex-direction:column;gap:12px;max-height:56vh;overflow-y:auto;padding-right:2px;"></div>
+          </div>
+
+          <!-- 单个 AI 独立参数设置视图 -->
+          <div id="perModelParamsView" style="display:none;flex-direction:column;gap:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--border-color);">
+              <div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">
+                <button type="button" class="btn btn-xs btn-secondary" style="flex-shrink:0;" onclick="window.closePerModelParamsEditor && window.closePerModelParamsEditor()">返回</button>
+                <div style="font-weight:700;font-size:14px;color:var(--text-main);white-space:normal;word-break:break-all;line-height:1.4;">
+                  独立参数：<span id="perModelParamsTargetTitle" style="color:#818cf8;"></span>
+                </div>
+              </div>
+              <span id="perModelParamsActiveBadge" class="wb-badge" style="color:#34d399;border-color:rgba(16,185,129,0.45);background:rgba(16,185,129,0.12);">最高优先</span>
+            </div>
+
+            <!-- 快捷预设按钮 -->
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+              <span style="font-size:12.5px;font-weight:600;color:var(--text-main);">预设</span>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="btn btn-xs btn-secondary" onclick="window.applyPerModelPreset && window.applyPerModelPreset('novel')">小说</button>
+                <button type="button" class="btn btn-xs btn-secondary" onclick="window.applyPerModelPreset && window.applyPerModelPreset('strict')">严谨</button>
+                <button type="button" class="btn btn-xs btn-secondary" onclick="window.applyPerModelPreset && window.applyPerModelPreset('creative')">发散</button>
+              </div>
+            </div>
+
+            <div class="numeric-params-grid" style="max-height:42vh;overflow-y:auto;padding-right:4px;">
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>温度</span>
+                  <input type="number" id="pm_temperature" class="param-num-input" step="0.05" min="0" max="2" value="0.68" oninput="document.getElementById('pm_temperature_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_temperature_range" min="0" max="2" step="0.05" value="0.68" oninput="document.getElementById('pm_temperature').value=Number(this.value).toFixed(2)" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>Top-P</span>
+                  <input type="number" id="pm_top_p" class="param-num-input" step="0.05" min="0.1" max="1.0" value="0.90" oninput="document.getElementById('pm_top_p_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_top_p_range" min="0.1" max="1.0" step="0.05" value="0.90" oninput="document.getElementById('pm_top_p').value=Number(this.value).toFixed(2)" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>Top-K</span>
+                  <input type="number" id="pm_top_k" class="param-num-input" step="1" min="0" max="100" value="40" oninput="document.getElementById('pm_top_k_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_top_k_range" min="0" max="100" step="1" value="40" oninput="document.getElementById('pm_top_k').value=this.value" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>Min-P</span>
+                  <input type="number" id="pm_min_p" class="param-num-input" step="0.01" min="0.0" max="0.5" value="0.06" oninput="document.getElementById('pm_min_p_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_min_p_range" min="0.0" max="0.5" step="0.01" value="0.06" oninput="document.getElementById('pm_min_p').value=Number(this.value).toFixed(2)" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>重复惩罚</span>
+                  <input type="number" id="pm_repetition_penalty" class="param-num-input" step="0.01" min="1.0" max="1.5" value="1.05" oninput="document.getElementById('pm_repetition_penalty_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_repetition_penalty_range" min="1.0" max="1.5" step="0.01" value="1.05" oninput="document.getElementById('pm_repetition_penalty').value=Number(this.value).toFixed(2)" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>频率惩罚</span>
+                  <input type="number" id="pm_frequency_penalty" class="param-num-input" step="0.05" min="-2.0" max="2.0" value="0.05" oninput="document.getElementById('pm_frequency_penalty_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_frequency_penalty_range" min="-2.0" max="2.0" step="0.05" value="0.05" oninput="document.getElementById('pm_frequency_penalty').value=Number(this.value).toFixed(2)" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>存在惩罚</span>
+                  <input type="number" id="pm_presence_penalty" class="param-num-input" step="0.05" min="-2.0" max="2.0" value="0.20" oninput="document.getElementById('pm_presence_penalty_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_presence_penalty_range" min="-2.0" max="2.0" step="0.05" value="0.20" oninput="document.getElementById('pm_presence_penalty').value=Number(this.value).toFixed(2)" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>最大输出</span>
+                  <input type="number" id="pm_max_tokens" class="param-num-input" step="256" min="256" max="65536" value="4096" oninput="document.getElementById('pm_max_tokens_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_max_tokens_range" min="256" max="65536" step="256" value="4096" oninput="document.getElementById('pm_max_tokens').value=this.value" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>上下文轮数</span>
+                  <input type="number" id="pm_context" class="param-num-input" step="1" min="2" max="200" value="64" oninput="document.getElementById('pm_context_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_context_range" min="2" max="200" step="1" value="64" oninput="document.getElementById('pm_context').value=this.value" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>上下文上限 (k)</span>
+                  <input type="number" id="pm_max_context_k" class="param-num-input" step="4" min="4" max="512" value="96" oninput="document.getElementById('pm_max_context_k_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_max_context_k_range" min="4" max="512" step="4" value="96" oninput="document.getElementById('pm_max_context_k').value=this.value" />
+              </div>
+
+              <div class="param-slider-row">
+                <div class="param-slider-header">
+                  <span>思考预算</span>
+                  <input type="number" id="pm_thinking_budget" class="param-num-input" step="256" min="0" max="65536" value="1024" oninput="document.getElementById('pm_thinking_budget_range').value=this.value" />
+                </div>
+                <input type="range" id="pm_thinking_budget_range" min="0" max="65536" step="256" value="1024" oninput="document.getElementById('pm_thinking_budget').value=this.value" />
+              </div>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border-color);">
+              <button type="button" class="btn btn-sm btn-secondary text-danger" onclick="window.clearPerModelParams && window.clearPerModelParams()">
+                恢复默认
+              </button>
+              <div style="display:flex;gap:8px;">
+                <button type="button" class="btn btn-sm btn-secondary" onclick="window.closePerModelParamsEditor && window.closePerModelParamsEditor()">取消</button>
+                <button type="button" class="btn btn-sm btn-primary" onclick="window.savePerModelParams && window.savePerModelParams()">保存</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================= Tab 2: 本地 / 指定路径 ================= -->
+        <div id="modelTabPane_local" class="model-tab-pane" style="display:none;flex-direction:column;gap:12px;max-height:66vh;overflow-y:auto;padding-right:3px;">
+          <!-- 1. 整合包 model 文件夹即放即用面板 -->
+          <div class="context-setting-card" style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+              <div style="display:flex;flex-direction:column;gap:3px;">
+                <div style="font-size:14px;font-weight:700;color:var(--text-main);display:flex;align-items:center;gap:6px;">
+                  <span><code>model/</code> 目录</span>
+                </div>
+                <div style="font-size:12px;color:var(--text-dim);line-height:1.45;">
+                  放入 <code>.gguf</code> 自动识别
+                </div>
+                <div id="localBundleModelDirDisplay" style="font-size:11.5px;color:#94a3b8;font-family:monospace;word-break:break-all;"></div>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;max-width:100%;">
+                <button type="button" class="btn btn-sm btn-secondary" onclick="window.openLocalBundleModelFolder && window.openLocalBundleModelFolder()">
+                  打开目录
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary" style="color:#38bdf8;border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.1);" onclick="window.switchModelSettingsTab('hf')">
+                  下载
+                </button>
+                <button type="button" id="btnAutoScanLocalAi" class="btn btn-sm btn-primary" onclick="window.autoScanLocalAiModels && window.autoScanLocalAiModels()">
+                  扫描
+                </button>
+              </div>
+            </div>
+            <div id="localScanResultBox" style="width:100%;text-align:left;margin-top:2px;"></div>
+          </div>
+
+          <!-- 2. 指定外部路径模型运行（支持任意盘符 .gguf 文件或文件夹） -->
+          <div class="context-setting-card" style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div>
+                <div style="font-size:13.5px;font-weight:700;color:var(--text-main);">指定路径</div>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" id="btnPickCustomGgufFile" class="btn btn-xs btn-secondary" onclick="window.pickCustomModelPathDialog && window.pickCustomModelPathDialog('file')">
+                  选文件
+                </button>
+                <button type="button" id="btnPickCustomGgufDir" class="btn btn-xs btn-secondary" onclick="window.pickCustomModelPathDialog && window.pickCustomModelPathDialog('dir')">
+                  选目录
+                </button>
+              </div>
+            </div>
+
+            <div class="ai-fused-input-group" style="width:100%;">
+              <input type="text" id="customModelPathInput" class="ai-fused-input" style="flex:1;min-width:220px;" placeholder=".gguf 文件或目录路径" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();window.addCustomModelPathFromInput && window.addCustomModelPathFromInput();}" />
+              <button type="button" id="btnAddCustomModelPath" class="ai-fused-btn" onclick="window.addCustomModelPathFromInput && window.addCustomModelPathFromInput()">挂载</button>
+            </div>
+
+            <div id="customModelPathsListBox" style="display:flex;flex-direction:column;gap:6px;"></div>
+          </div>
+
+          <details class="advanced-fold-box" id="localManualSubmenu">
+            <summary class="advanced-fold-summary">本地端口</summary>
+            <div class="advanced-fold-body" style="padding-top:12px;display:flex;flex-direction:column;gap:10px;">
+              <div class="form-group" style="margin:0;">
+                <label for="settingLocalBaseUrl"><b>接口地址</b></label>
+                <input type="text" id="settingLocalBaseUrl" class="form-input" placeholder="http://127.0.0.1:11434/v1" value="" />
+              </div>
+              <div class="form-group" style="margin:0;">
+                <label for="settingLocalModel"><b>模型名</b></label>
+                <input type="text" id="settingLocalModel" class="form-input" placeholder="留空自动获取" value="" />
+              </div>
+              <div style="display:flex;justify-content:flex-end;">
+                <button type="button" class="btn btn-primary btn-sm" onclick="window.saveManualLocalAiConfig && window.saveManualLocalAiConfig()">
+                  保存
+                </button>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- ================= Tab 3: 下载模型 (HF) ================= -->
+        <div id="modelTabPane_hf" class="model-tab-pane" style="display:none;flex-direction:column;gap:12px;max-height:66vh;overflow-y:auto;padding-right:3px;">
+          <!-- 顶部下载源与目录控制栏 -->
+          <div class="context-setting-card" style="padding:10px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="font-size:13.5px;font-weight:700;color:var(--text-main);">下载模型</span>
+              <a href="https://huggingface.co/dongfangshuo" target="_blank" rel="noopener" class="wb-badge" style="color:#38bdf8;border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.1);text-decoration:none;">HF 主页</a>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <select id="hfMirrorSelect" class="form-input" style="width:auto;padding:4px 10px;font-size:12px;height:30px;">
+                <option value="hf-mirror" selected>hf-mirror.com</option>
+                <option value="official">huggingface.co</option>
+              </select>
+              <button type="button" class="btn btn-xs btn-secondary" onclick="window.openLocalBundleModelFolder && window.openLocalBundleModelFolder()">
+                打开目录
+              </button>
+              <button type="button" class="btn btn-xs btn-secondary" onclick="window.loadLocalModelsManagerStatus && window.loadLocalModelsManagerStatus(true)">
+                刷新
+              </button>
+            </div>
+          </div>
+
+          <!-- 实时下载进度面板 -->
+          <div id="hfActiveDownloadsBox" style="display:none;flex-direction:column;gap:8px;"></div>
+
+          <!-- 东方朔官方模型卡片列表 -->
+          <div id="hfCatalogContainer" style="display:flex;flex-direction:column;gap:12px;"></div>
+        </div>
+
+        <!-- ================= Tab 4: API ================= -->
+        <div id="modelTabPane_api" class="model-tab-pane" style="display:none;flex-direction:column;gap:14px;">
+          <div class="context-setting-card" style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+            <div class="form-group" style="margin:0;">
+              <label for="settingBaseUrl"><b>API 地址</b></label>
+              <input type="text" id="settingBaseUrl" class="form-input" placeholder="https://api.xxx.com/v1" value="" />
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label for="settingApiKey"><b>API Key</b></label>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <input type="password" id="settingApiKey" class="form-input" style="flex:1;" placeholder="sk-..." value="" />
+                <button type="button" class="btn btn-secondary btn-sm" onclick="window.toggleSettingApiKeyVis && window.toggleSettingApiKeyVis()">显示</button>
+              </div>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px;">
+              <div id="apiConnectStatusBox" style="font-size:12.5px;color:var(--text-dim);"></div>
+              <button type="button" id="btnSaveMinimalistApi" class="btn btn-primary" onclick="window.saveMinimalistApiConfig && window.saveMinimalistApiConfig()">
+                保存
+              </button>
+            </div>
+          </div>
+
+          <details class="advanced-fold-box" id="apiManualModelSubmenu">
+            <summary class="advanced-fold-summary">添加模型</summary>
+            <div class="advanced-fold-body" style="padding-top:12px;display:flex;flex-direction:column;gap:10px;">
+              <div class="ai-fused-input-group" style="width:100%;">
+                <input type="text" id="minimalistCustomModelInput" class="ai-fused-input" style="flex:1;min-width:200px;" placeholder="模型 ID" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();window.addMinimalistCustomModel && window.addMinimalistCustomModel();}" />
+                <button type="button" class="ai-fused-btn" onclick="window.addMinimalistCustomModel && window.addMinimalistCustomModel()">添加</button>
+              </div>
+              <div id="minimalistSavedCustomModelsWrap" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗3：系统设置 ================= -->
+  <div id="settingsModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>设置</h3>
+        <button class="modal-close" id="btnCloseSettingsModal" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- ================= 1. 全局系统参数（默认显示） ================= -->
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div style="padding-top:4px;">
+            <div class="form-group">
+              <label><b>界面方向</b></label>
+              <div class="gui-orientation-seg-bar" id="guiOrientationSegBar">
+                <button type="button" id="btnGuiOrientAuto" class="gui-orient-seg-btn" onclick="window.setGuiOrientation && window.setGuiOrientation('auto')">
+                  自动
+                </button>
+                <button type="button" id="btnGuiOrientLandscape" class="gui-orient-seg-btn" onclick="window.setGuiOrientation && window.setGuiOrientation('landscape')">
+                  横屏
+                </button>
+                <button type="button" id="btnGuiOrientPortrait" class="gui-orient-seg-btn" onclick="window.setGuiOrientation && window.setGuiOrientation('portrait')">
+                  竖屏
+                </button>
+              </div>
+              <small class="param-item-hint gui-orient-hint">仅本设备生效</small>
+              <input type="hidden" id="settingGuiOrientation" value="landscape" />
+            </div>
+
+            <div class="form-group">
+              <label for="settingProxy"><b>代理</b></label>
+              <div class="proxy-row">
+                <input type="text" id="settingProxy" class="form-input" placeholder="http://127.0.0.1:7890" value="" />
+                <label class="switch-wrap">
+                  <input type="checkbox" id="settingUseProxy" />
+                  <span>启用</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- 全局默认参数卡片 -->
+            <div class="context-setting-card" style="margin-bottom:14px;">
+              <div class="context-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <b>全局参数</b>
+                  <span id="globalParamsModelOverrideBadge" class="wb-badge" style="display:none;color:#fcd34d;border-color:rgba(245,158,11,0.45);background:rgba(245,158,11,0.12);font-size:11px;">已被模型参数覆盖</span>
+                </div>
+                <div id="globalParamsHeaderActions" style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button type="button" id="btnResetGlobalParams" class="btn btn-xs btn-outline-secondary">恢复默认</button>
+                  <button type="button" id="btnSyncGlobalParamsToProjects" class="btn btn-xs btn-secondary" title="同步到全部剧本">同步全部</button>
+                </div>
+              </div>
+              <div id="globalParamsModelOverrideBanner" style="display:none;"></div>
+              <div class="context-body" id="globalParamsContextBody">
+                <div class="numeric-params-grid">
+                  <!-- 1. 温度 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>温度</span>
+                      <input type="number" id="settingTemperature" class="param-num-input" step="0.05" min="0" max="2" value="0.68" />
+                    </div>
+                    <input type="range" id="settingTemperatureRange" min="0" max="2" step="0.05" value="0.68" />
+                    <small class="param-item-hint">默认 0.68</small>
+                  </div>
+
+                  <!-- 2. 重复惩罚 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>重复惩罚</span>
+                      <input type="number" id="settingRepetitionPenalty" class="param-num-input" step="0.01" min="1.0" max="1.5" value="1.05" />
+                    </div>
+                    <input type="range" id="settingRepetitionPenaltyRange" min="1.0" max="1.5" step="0.01" value="1.05" />
+                    <small class="param-item-hint">默认 1.05</small>
+                  </div>
+
+                  <!-- 3. 频率惩罚 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>频率惩罚</span>
+                      <input type="number" id="settingFrequencyPenalty" class="param-num-input" step="0.05" min="-2.0" max="2.0" value="0.05" />
+                    </div>
+                    <input type="range" id="settingFrequencyPenaltyRange" min="-2.0" max="2.0" step="0.05" value="0.05" />
+                    <small class="param-item-hint">默认 0.05</small>
+                  </div>
+
+                  <!-- 4. 存在惩罚 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>存在惩罚</span>
+                      <input type="number" id="settingPresencePenalty" class="param-num-input" step="0.05" min="-2.0" max="2.0" value="0.20" />
+                    </div>
+                    <input type="range" id="settingPresencePenaltyRange" min="-2.0" max="2.0" step="0.05" value="0.20" />
+                    <small class="param-item-hint">默认 0.20</small>
+                  </div>
+
+                  <!-- 5. Top-P -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>Top-P</span>
+                      <input type="number" id="settingTopP" class="param-num-input" step="0.05" min="0.1" max="1.0" value="0.90" />
+                    </div>
+                    <input type="range" id="settingTopPRange" min="0.1" max="1.0" step="0.05" value="0.90" />
+                    <small class="param-item-hint">默认 0.90</small>
+                  </div>
+
+                  <!-- 6. Top-K -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>Top-K</span>
+                      <input type="number" id="settingTopK" class="param-num-input" step="1" min="0" max="100" value="40" />
+                    </div>
+                    <input type="range" id="settingTopKRange" min="0" max="100" step="1" value="40" />
+                    <small class="param-item-hint">默认 40</small>
+                  </div>
+
+                  <!-- 7. Min-P -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>Min-P</span>
+                      <input type="number" id="settingMinP" class="param-num-input" step="0.01" min="0.0" max="0.5" value="0.06" />
+                    </div>
+                    <input type="range" id="settingMinPRange" min="0.0" max="0.5" step="0.01" value="0.06" />
+                    <small class="param-item-hint">默认 0.06</small>
+                  </div>
+
+                  <!-- 8. 单次最大生成长度 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>最大输出</span>
+                      <input type="number" id="settingMaxTokens" class="param-num-input" step="256" min="256" max="65536" value="4096" />
+                    </div>
+                    <input type="range" id="settingMaxTokensRange" min="256" max="65536" step="256" value="4096" />
+                    <small class="param-item-hint">默认 4096</small>
+                  </div>
+
+                  <!-- 9. 上下文计算方式 + 轮数 / Token 长度 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header" style="gap:6px;">
+                      <span>上下文计算</span>
+                      <select id="settingContextMode" class="form-select" style="width:auto;padding:2px 8px;font-size:12px;height:26px;">
+                        <option value="turns">按轮数</option>
+                        <option value="tokens">按 Token</option>
+                      </select>
+                    </div>
+                    <div id="settingContextTurnsGroup">
+                      <div class="param-slider-header" style="margin-top:4px;">
+                        <span style="font-size:12px;color:var(--text-muted);">上下文轮数</span>
+                        <input type="number" id="settingContextTurns" class="param-num-input" step="1" min="2" max="200" value="64" />
+                      </div>
+                      <input type="range" id="settingContextTurnsRange" min="2" max="200" step="1" value="64" />
+                      <small class="param-item-hint">保留最近 <b id="settingContextMsgsHint">128</b> 条消息</small>
+                    </div>
+                  </div>
+
+                  <!-- 9.5 最大上下文 Token 长度 (k) -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>上下文上限 (k)</span>
+                      <input type="number" id="settingMaxContextK" class="param-num-input" step="4" min="4" max="512" value="96" />
+                    </div>
+                    <input type="range" id="settingMaxContextKRange" min="4" max="512" step="4" value="96" />
+                    <small class="param-item-hint">默认 96k</small>
+                  </div>
+
+                  <!-- 10. 压缩保留近期消息数 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>压缩保留</span>
+                      <input type="number" id="settingKeepRecent" class="param-num-input" step="2" min="2" max="30" value="6" />
+                    </div>
+                    <input type="range" id="settingKeepRecentRange" min="2" max="30" step="2" value="6" />
+                    <small class="param-item-hint">默认 6</small>
+                  </div>
+
+                  <!-- 11. 思考预算 -->
+                  <div class="param-slider-row">
+                    <div class="param-slider-header">
+                      <span>思考预算</span>
+                      <input type="number" id="settingThinkingBudget" class="param-num-input" step="256" min="0" max="65536" value="1024" />
+                    </div>
+                    <input type="range" id="settingThinkingBudgetRange" min="0" max="65536" step="256" value="1024" />
+                    <small class="param-item-hint">默认 1024</small>
+                  </div>
+                </div>
+
+                <label class="checkbox-row" style="margin-top:8px;">
+                  <input type="checkbox" id="settingAutoSummarize" checked />
+                  <span>超限自动压缩</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- 系统提示词 -->
+            <div class="context-setting-card" style="margin-bottom:14px;border-color:rgba(245,158,11,0.42);background:rgba(245,158,11,0.04);">
+              <div class="context-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <b style="color:#fcd34d;">系统提示词</b>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button type="button" class="btn btn-xs btn-outline-secondary" style="border-color:rgba(245,158,11,0.5);color:#fde68a;" onclick="window.resetGlobalSystemProtocolPrompt && window.resetGlobalSystemProtocolPrompt()">恢复默认</button>
+                </div>
+              </div>
+              <div class="context-body" style="padding-top:8px;">
+                <textarea id="settingGlobalSystemProtocolPrompt" rows="10" class="form-textarea" style="font-size:11.5px;line-height:1.55;width:100%;" placeholder="输入系统提示词..." onblur="window.saveGlobalSystemProtocolPrompt && window.saveGlobalSystemProtocolPrompt(this.value)"></textarea>
+              </div>
+            </div>
+
+            <div class="form-group" style="margin-bottom:6px;">
+              <label><b>访问地址</b></label>
+            </div>
+            <div class="form-group">
+              <label><b>公网</b></label>
+              <div class="url-copy-box">
+                <input type="text" id="remotePublicUrl" class="form-input" readonly value="读取中..." />
+                <button id="btnCopyPublicUrl" class="btn btn-primary btn-sm" type="button">复制</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label><b>局域网</b></label>
+              <div class="url-copy-box">
+                <input type="text" id="remoteLanUrl" class="form-input" readonly value="读取中..." />
+                <button id="btnCopyLanUrl" class="btn btn-secondary btn-sm" type="button">复制</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label><b>本机</b></label>
+              <div class="url-copy-box">
+                <input type="text" id="remoteLocalUrl" class="form-input" readonly value="http://127.0.0.1:8765" />
+                <button id="btnCopyLocalUrl" class="btn btn-secondary btn-sm" type="button">复制</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ================= 2. 导入导出备份（置于最底部） ================= -->
+        <details class="advanced-fold-box" id="settingsBackupSubmenu" style="margin-top: 14px;">
+          <summary class="advanced-fold-summary">备份</summary>
+          <div class="advanced-fold-body" style="padding-top: 12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px;">
+              <span style="font-size:12.5px;color:var(--text-dim);">选择数据</span>
+              <label class="checkbox-row" style="margin:0;cursor:pointer;">
+                <input type="checkbox" id="chkBackupSelectAll" checked onchange="window.toggleBackupSelectAll(this.checked)" />
+                <span class="backup-select-all-label" style="font-weight:600;">全选</span>
+              </label>
+            </div>
+
+            <div class="global-params-card" style="padding:12px;display:flex;flex-direction:column;gap:10px;">
+              <!-- 勾选分类列表 -->
+              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:8px;">
+                <!-- 1. 剧本 -->
+                <div class="backup-cat-card">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <label class="checkbox-row" style="margin:0;cursor:pointer;">
+                      <input type="checkbox" id="chkBackupProjects" class="backup-cat-chk" checked onchange="window.onBackupCatChange()" />
+                      <span><b>剧本</b> <small id="backupProjectsCountLabel" style="color:var(--text-dim);">(全部)</small></span>
+                    </label>
+                    <button type="button" class="btn btn-xs btn-secondary" onclick="window.toggleBackupSubList('backupProjectsSubList', this)">筛选 ▾</button>
+                  </div>
+                  <div id="backupProjectsSubList" style="display:none;max-height:150px;overflow-y:auto;margin-top:8px;padding-top:6px;border-top:1px dashed var(--border-color);flex-direction:column;gap:4px;"></div>
+                </div>
+
+                <!-- 2. 对话 -->
+                <div class="backup-cat-card">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <label class="checkbox-row" style="margin:0;cursor:pointer;">
+                      <input type="checkbox" id="chkBackupChats" class="backup-cat-chk" checked onchange="window.onBackupCatChange()" />
+                      <span><b>对话</b> <small id="backupChatsCountLabel" style="color:var(--text-dim);">(全部)</small></span>
+                    </label>
+                    <button type="button" class="btn btn-xs btn-secondary" onclick="window.toggleBackupSubList('backupChatsSubList', this)">筛选 ▾</button>
+                  </div>
+                  <div id="backupChatsSubList" style="display:none;max-height:150px;overflow-y:auto;margin-top:8px;padding-top:6px;border-top:1px dashed var(--border-color);flex-direction:column;gap:4px;"></div>
+                </div>
+
+                <!-- 3. 全局设置与预设 -->
+                <div class="backup-cat-card" style="display:flex;align-items:center;">
+                  <label class="checkbox-row" style="margin:0;cursor:pointer;">
+                    <input type="checkbox" id="chkBackupSettings" class="backup-cat-chk" checked onchange="window.onBackupCatChange()" />
+                    <span><b>设置</b> <small id="backupSettingsCountLabel" style="color:var(--text-dim);">(API/参数)</small></span>
+                  </label>
+                </div>
+
+                <!-- 4. 图片与图库素材 -->
+                <div class="backup-cat-card" style="display:flex;align-items:center;">
+                  <label class="checkbox-row" style="margin:0;cursor:pointer;">
+                    <input type="checkbox" id="chkBackupGallery" class="backup-cat-chk" checked onchange="window.onBackupCatChange()" />
+                    <span><b>素材图库</b> <small id="backupGalleryCountLabel" style="color:var(--text-dim);">(0 张)</small></span>
+                  </label>
+                </div>
+
+                <!-- 5. 提示词与系统日志 -->
+                <div class="backup-cat-card" style="display:flex;align-items:center;">
+                  <label class="checkbox-row" style="margin:0;cursor:pointer;">
+                    <input type="checkbox" id="chkBackupLogs" class="backup-cat-chk" checked onchange="window.onBackupCatChange()" />
+                    <span><b>日志</b> <small id="backupLogsCountLabel" style="color:var(--text-dim);">(全部)</small></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- 导出到文件夹 -->
+              <div class="backup-export-card">
+                <label class="backup-export-title">导出</label>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                  <input type="text" id="backupExportFolderPath" class="form-input" style="flex:1;min-width:200px;" placeholder="留空自动生成" />
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="window.pickBackupFolder('backupExportFolderPath', '选择导出目录')">浏览</button>
+                  <button type="button" id="btnDoBackupExport" class="btn btn-primary btn-sm" onclick="window.handleExportBackupToFolder()">导出</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="window.handleOpenBackupFolder('backupExportFolderPath')">打开</button>
+                </div>
+              </div>
+
+              <!-- 从文件夹导入 -->
+              <div class="backup-import-card">
+                <label class="backup-import-title">导入</label>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                  <input type="text" id="backupImportFolderPath" class="form-input" style="flex:1;min-width:200px;" placeholder="备份目录" />
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="window.pickBackupFolder('backupImportFolderPath', '选择备份目录')">浏览</button>
+                  <button type="button" id="btnDoBackupImport" class="btn btn-primary btn-sm" style="background:linear-gradient(135deg,#059669,#10b981);" onclick="window.handleImportBackupFromPath()">导入</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('backupFolderUploadInput').click()">选目录</button>
+                  <input type="file" id="backupFolderUploadInput" webkitdirectory directory multiple style="display:none;" onchange="window.handleImportBackupFromBrowserFiles(event)" />
+                </div>
+              </div>
+
+              <div id="backupStatusNotice" class="backup-status-notice" style="display:none;"></div>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="modal-footer">
+        <button id="btnSaveSettings" class="btn btn-primary" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗4：账号信息 ================= -->
+  <div id="userModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>账号信息</h3>
+        <button class="modal-close" id="btnCloseUserModal" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="user-card-header">
+          <div class="user-avatar-lg"></div>
+          <div class="user-info-text">
+            <h4 id="userModalName">admin</h4>
+          </div>
+          <button id="btnToggleChangePwd" class="btn btn-xs btn-secondary" type="button" style="margin-left:auto;">修改密码</button>
+        </div>
+
+        <!-- 折叠修改密码表单 -->
+        <div id="changePwdBox" class="change-pwd-box" style="display: none;">
+          <div class="form-group">
+            <label>原密码</label>
+            <input type="password" id="oldPasswordInput" class="form-input" placeholder="输入原密码" />
+          </div>
+          <div class="form-group">
+            <label>新密码</label>
+            <input type="password" id="newPasswordInput" class="form-input" placeholder="输入新密码" />
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;">
+            <button id="btnCancelChangePwd" class="btn btn-xs btn-secondary" type="button">取消</button>
+            <button id="btnSubmitChangePwd" class="btn btn-xs btn-primary" type="button">确认</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label><b>当前连接</b></label>
+          <div class="device-current-card">
+            <div class="device-info-row">
+              <span class="label-dim">设备：</span>
+              <span id="currDeviceName" class="val-highlight">检测中...</span>
+            </div>
+            <div class="device-info-row">
+              <span class="label-dim">IP：</span>
+              <span id="currClientIp" class="val-highlight">检测中...</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label><b>登录记录</b></label>
+          <div class="login-history-container">
+            <table class="login-history-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>设备</th>
+                  <th>IP</th>
+                </tr>
+              </thead>
+              <tbody id="loginHistoryTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer space-between">
+        <button id="btnLogoutModalBtn" class="btn btn-danger btn-sm" type="button">退出</button>
+        <button id="btnCloseUserModalBtn" class="btn btn-secondary btn-sm" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗5.5：模型列表与价格 ================= -->
+  <div id="pricingModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>模型价格</h3>
+        <button class="modal-close" id="btnClosePricingModal" type="button">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;">
+          <div id="pricingFilterTabs" style="display:flex;flex-wrap:wrap;gap:6px;">
+            <button type="button" class="btn btn-xs btn-primary pricing-tab-btn" data-filter="all">全部</button>
+            <button type="button" class="btn btn-xs btn-secondary pricing-tab-btn" data-filter="local">本地</button>
+            <button type="button" class="btn btn-xs btn-secondary pricing-tab-btn" data-filter="gemini">Gemini</button>
+            <button type="button" class="btn btn-xs btn-secondary pricing-tab-btn" data-filter="claude">Claude</button>
+            <button type="button" class="btn btn-xs btn-secondary pricing-tab-btn" data-filter="deepseek">DeepSeek</button>
+            <button type="button" class="btn btn-xs btn-secondary pricing-tab-btn" data-filter="other">其他</button>
+            <button type="button" class="btn btn-xs btn-secondary pricing-tab-btn" data-filter="per_call">API 按次</button>
+            <button type="button" class="btn btn-xs btn-secondary pricing-tab-btn" data-filter="token">API 按量</button>
+          </div>
+          <input type="text" id="pricingSearchInput" class="form-input" style="max-width:230px;padding:6px 10px;font-size:13px;" placeholder="搜索模型..." />
+        </div>
+
+        <div class="login-history-container" style="max-height:60vh;overflow-y:auto;">
+          <table class="login-history-table" style="width:100%;">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th style="width:90px;">类型</th>
+                <th>价格</th>
+                <th style="width:86px;text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="pricingTableBody">
+              <tr><td colspan="4" style="text-align:center;padding:20px;">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer space-between">
+        <span id="pricingCountSummary" style="font-size:12.5px;color:var(--text-dim);">共 0 个模型</span>
+        <button id="btnClosePricingModalBtn" class="btn btn-secondary btn-sm" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗6：通用对话框 ================= -->
+  <div id="customDialogModal" class="modal-overlay" style="display: none; z-index: 3000;">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3 id="customDialogTitle">提示</h3>
+        <button class="modal-close" id="btnCloseCustomDialog" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="customDialogMessage" class="dialog-msg"></p>
+        <input type="text" id="customDialogInput" class="form-input" style="display: none;" />
+      </div>
+      <div class="modal-footer">
+        <button id="btnCustomDialogCancel" class="btn btn-secondary btn-sm" type="button">取消</button>
+        <button id="btnCustomDialogConfirm" class="btn btn-primary btn-sm" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗7：新建剧本(高级) ================= -->
+  <div id="exploreModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-xl">
+      <div class="modal-header">
+        <h3 id="exploreModalTitle">高级新建</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('exploreModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" id="exploreModalBody"></div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗8：后台日志 ================= -->
+  <div id="promptLogModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-xl">
+      <div class="modal-header">
+        <h3>日志</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('promptLogModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" id="promptLogModalBody"></div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗9A：回复发送时选择角色卡（仅选择角色发送） ================= -->
+  <div id="charCardSelectModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-xl" style="max-width:760px;">
+      <div class="modal-header">
+        <h3>选择角色卡</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('charCardSelectModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
+          <input type="text" id="charCardPickerSearchInput" class="form-input" style="max-width:240px;" placeholder="搜索角色..." oninput="window.renderCharCardPicker()" />
+        </div>
+        <div id="charCardPickerGrid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:10px;max-height:52vh;overflow-y:auto;padding:2px;"></div>
+      </div>
+      <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;">
+        <span id="charCardPickerSelectedSummary" class="charcard-modal-summary">已选 0 张</span>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-secondary" onclick="window.clearAllSelectedCharCards()">清空</button>
+          <button type="button" class="btn btn-primary" onclick="document.getElementById('charCardSelectModal').style.display='none'">确认</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗9B：角色卡库 ================= -->
+  <div id="charCardModal" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-xl" style="max-width:860px;">
+      <div class="modal-header">
+        <h3>角色卡库</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('charCardModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <button type="button" class="btn btn-primary btn-sm" onclick="window.openCharCardEditorModal(null, 'simple')">新建</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('charCardImportFileInput').click()">导入</button>
+            <input type="file" id="charCardImportFileInput" accept=".json,.png" multiple style="display:none;" onchange="window.handleImportCharCardFiles(event)" />
+          </div>
+          <input type="text" id="charCardSearchInput" class="form-input" style="max-width:240px;" placeholder="搜索角色卡..." oninput="window.renderCharCardLibrary()" />
+        </div>
+
+        <div id="charCardLibraryGrid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(250px, 1fr));gap:10px;max-height:52vh;overflow-y:auto;padding:2px;"></div>
+      </div>
+      <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;">
+        <span id="charCardModalSelectedSummary" class="charcard-modal-summary">共 0 张</span>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-primary" onclick="document.getElementById('charCardModal').style.display='none'">完成</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗10：编辑 / 新建角色卡 ================= -->
+  <div id="charCardEditorModal" class="modal-overlay" style="display: none; z-index: 2500;">
+    <div class="modal-card modal-xl" style="max-width:720px;">
+      <div class="modal-header">
+        <h3 id="charEditorModalTitle">编辑角色卡</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('charCardEditorModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;max-height:74vh;overflow-y:auto;">
+        <input type="hidden" id="charEditId" value="" />
+        <input type="hidden" id="charEditMode" value="simple" />
+
+        <!-- 旧版简易/高级切换横条已隐藏 -->
+        <div class="char-mode-switch-bar" style="display:none !important;">
+          <button type="button" id="btnCharModeSimple" onclick="window.switchCharEditorMode('simple')"></button>
+          <button type="button" id="btnCharModeAdvanced" onclick="window.switchCharEditorMode('advanced')"></button>
+        </div>
+
+        <!-- 1 & 2. 角色图片 + 角色名称 -->
+        <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+            <div id="charEditAvatarPreview" class="char-edit-avatar-preview" style="width:92px;height:92px;" onclick="document.getElementById('charEditAvatarFileInput').click()"></div>
+            <button type="button" class="btn btn-xs btn-secondary" onclick="document.getElementById('charEditAvatarFileInput').click()">传图</button>
+            <input type="file" id="charEditAvatarFileInput" accept="image/*" style="display:none;" onchange="window.handleCharEditAvatarSelect(event)" />
+          </div>
+
+          <div style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:6px;">
+            <div class="char-editable-label-wrap" title="点击改名">
+              <input type="text" id="charEditLabel_name" class="char-editable-label-input" data-default-label="角色名称" value="角色名称" placeholder="栏位名" />
+              
+            </div>
+            <input type="text" id="charEditName" class="form-input" style="font-size:15px;font-weight:600;" placeholder="角色名" />
+          </div>
+        </div>
+
+        <!-- AI 自动填卡 -->
+        <div class="char-ai-assist-bar" style="display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:10px;border:1px solid rgba(99,102,241,0.38);background:rgba(99,102,241,0.08);">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+            <span style="font-size:13px;font-weight:700;color:var(--text-main);">AI 填卡</span>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div style="display:flex;align-items:center;gap:4px;">
+                <span style="font-size:12px;color:var(--text-muted);font-weight:600;white-space:nowrap;">模型:</span>
+                <select id="charAiModelSelect" class="form-select ai-assist-model-select" style="width:auto;max-width:210px;padding:2px 24px 2px 8px;font-size:12px;height:26px;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)"></select>
+              </div>
+              <label class="checkbox-label" style="font-size:12px;margin:0;cursor:pointer;">
+                <input type="checkbox" id="charAiWebSearchToggle" checked />
+                <span>联网</span>
+              </label>
+            </div>
+          </div>
+          <div class="ai-fused-input-group" style="width:100%;">
+            <input type="text" id="charAiPromptInput" class="ai-fused-input" style="flex:1;min-width:180px;" placeholder="角色名 / 作品 / 人设" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();window.handleCharAiAssistGenerate();}" onpaste="window.handleCharAiPromptPaste && window.handleCharAiPromptPaste(event)" />
+            <button type="button" id="btnCharAiUploadImages" class="ai-fused-sub-btn" onclick="document.getElementById('charAiImageInput').click()" style="white-space:nowrap;" title="参考图">
+              传图
+            </button>
+            <input type="file" id="charAiImageInput" accept="image/*" multiple style="display:none;" onchange="window.handleCharAiImageSelect(event)" />
+            <button type="button" id="btnCharAiAssistGenerate" class="ai-fused-btn" onclick="window.handleCharAiAssistGenerate()" style="white-space:nowrap;">
+              生成
+            </button>
+          </div>
+          <div id="charAiImagePreviewBar" class="char-ai-image-preview-bar" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;padding-top:2px;"></div>
+          <div id="charAiAssistStatus" style="display:none;font-size:12px;color:var(--text-dim);line-height:1.4;"></div>
+        </div>
+
+        <!-- 3. 角色设定 Description（标题可点击直接修改） -->
+        <div class="form-group" style="margin:0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <div class="char-editable-label-wrap" title="点击改名">
+              <input type="text" id="charEditDescLabelInput" class="char-editable-label-input" value="角色设定" placeholder="栏位名" />
+              
+            </div>
+            <div id="charEditTemplateBtnWrap" style="display:none;"></div>
+          </div>
+          <textarea id="charEditDescription" class="form-textarea" rows="6" placeholder="外貌、性格、背景"></textarea>
+        </div>
+
+        <!-- 底部隐藏高级角色卡选项 -->
+        <details class="advanced-fold-box" style="margin-top:4px;">
+          <summary class="advanced-fold-summary">高级选项</summary>
+          <div id="charEditorAdvancedSection" class="advanced-fold-body" style="display:flex;flex-direction:column;gap:12px;padding-top:10px;">
+            <div class="form-group" style="margin:0;">
+              <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                <input type="text" id="charEditLabel_tags" class="char-editable-label-input" data-default-label="标签" value="标签" placeholder="栏位名" />
+                
+              </div>
+              <input type="text" id="charEditTags" class="form-input" placeholder="队友, 魔法师, 傲娇" />
+            </div>
+
+            <!-- 性格 Personality & 场景 Scenario -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:10px;">
+              <div class="form-group" style="margin:0;">
+                <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                  <input type="text" id="charEditLabel_personality" class="char-editable-label-input" data-default-label="性格 (Personality)" value="性格 (Personality)" placeholder="栏位名" />
+                  
+                </div>
+                <textarea id="charEditPersonality" class="form-textarea" rows="2" placeholder="性格概括"></textarea>
+              </div>
+              <div class="form-group" style="margin:0;">
+                <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                  <input type="text" id="charEditLabel_scenario" class="char-editable-label-input" data-default-label="场景 (Scenario)" value="场景 (Scenario)" placeholder="栏位名" />
+                  
+                </div>
+                <textarea id="charEditScenario" class="form-textarea" rows="2" placeholder="时间线、环境、关系"></textarea>
+              </div>
+            </div>
+
+            <!-- 开场白 First Message -->
+            <div class="form-group" style="margin:0;">
+              <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                <input type="text" id="charEditLabel_first_mes" class="char-editable-label-input" data-default-label="角色专属开场白 (First Message)" value="角色专属开场白 (First Message)" placeholder="栏位名" />
+                
+              </div>
+              <textarea id="charEditFirstMes" class="form-textarea" rows="3" placeholder="选填"></textarea>
+            </div>
+
+            <!-- 备用开场白 Alternate Greetings -->
+            <div class="form-group" style="margin:0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <div class="char-editable-label-wrap" title="点击改名">
+                  <input type="text" id="charEditLabel_alternate_greetings" class="char-editable-label-input" data-default-label="备用开场白 (Alternate Greetings)" value="备用开场白 (Alternate Greetings)" placeholder="栏位名" />
+                  
+                </div>
+                <button type="button" class="btn btn-xs btn-secondary" onclick="window.addCharEditorAlternateGreeting('')">+ 添加</button>
+              </div>
+              <div id="charEditGreetingsList" style="display:flex;flex-direction:column;gap:6px;"></div>
+            </div>
+
+            <!-- 示例对话 Example Messages -->
+            <div class="form-group" style="margin:0;">
+              <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                <input type="text" id="charEditLabel_mes_example" class="char-editable-label-input" data-default-label="示例对话 (Mes Example)" value="示例对话 (Mes Example)" placeholder="栏位名" />
+                
+              </div>
+              <textarea id="charEditMesExample" class="form-textarea" rows="3" placeholder="{{user}}: 你好&#10;{{char}}: *动作描写* 台词内容..."></textarea>
+            </div>
+
+            <!-- 系统提示词 System Prompt & 历史后指令 Post-History Instructions -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:10px;">
+              <div class="form-group" style="margin:0;">
+                <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                  <input type="text" id="charEditLabel_system_prompt" class="char-editable-label-input" data-default-label="角色提示词 (System Prompt)" value="角色提示词 (System Prompt)" placeholder="栏位名" />
+                  
+                </div>
+                <textarea id="charEditSystemPrompt" class="form-textarea" rows="2" placeholder="选填"></textarea>
+              </div>
+              <div class="form-group" style="margin:0;">
+                <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                  <input type="text" id="charEditLabel_post_history_instructions" class="char-editable-label-input" data-default-label="历史后指令 (Post-History Instructions)" value="历史后指令 (Post-History Instructions)" placeholder="栏位名" />
+                  
+                </div>
+                <textarea id="charEditPostHistory" class="form-textarea" rows="2" placeholder="选填"></textarea>
+              </div>
+            </div>
+
+            <!-- 作者备注 Creator Notes -->
+            <div class="form-group" style="margin:0;">
+              <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                <input type="text" id="charEditLabel_creator_notes" class="char-editable-label-input" data-default-label="作者备注 (Creator Notes)" value="作者备注 (Creator Notes)" placeholder="栏位名" />
+                
+              </div>
+              <textarea id="charEditCreatorNotes" class="form-textarea" rows="2" placeholder="说明、版本备注"></textarea>
+            </div>
+
+            <!-- Depth Prompt -->
+            <div class="form-group char-depth-prompt-card" style="margin:0;">
+              <div class="char-editable-label-wrap" style="margin-bottom:6px;" title="点击改名">
+                <input type="text" id="charEditLabel_depth_prompt" class="char-editable-label-input" data-default-label="深度提示词 (Depth Prompt)" value="深度提示词 (Depth Prompt)" placeholder="栏位名" />
+                
+              </div>
+              <textarea id="charEditDepthPrompt" class="form-textarea" rows="2" placeholder="按深度注入的笔记"></textarea>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
+                <div>
+                  <label style="font-size:12px;">深度</label>
+                  <input type="number" id="charEditDepthPromptDepth" class="form-input" min="0" step="1" value="4" />
+                </div>
+                <div>
+                  <label style="font-size:12px;">角色</label>
+                  <select id="charEditDepthPromptRole" class="form-input">
+                    <option value="system">system</option>
+                    <option value="user">user</option>
+                    <option value="assistant">assistant</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- 自定义扩展属性栏 -->
+            <div class="form-group" style="margin:0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-size:12.5px;font-weight:700;color:var(--text-muted);">自定义栏位</span>
+                <button type="button" class="btn btn-xs btn-secondary" onclick="window.addCharEditorCustomField('', '', true, false)">+ 添加</button>
+              </div>
+              <div id="charEditCustomFieldsList" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:8px;"></div>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('charCardEditorModal').style.display='none'">取消</button>
+        <button type="button" class="btn btn-primary" onclick="window.handleSaveCharCardFromEditor(false)">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗10：手动添加 API 与模型 ================= -->
+  <div id="manualApiModal" class="modal-overlay" style="display: none; z-index: 10030;">
+    <div class="modal-card" style="max-width: 560px; width: 92vw;">
+      <div class="modal-header">
+        <h3>添加 API</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('manualApiModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
+        <div class="form-group" style="margin:0;">
+          <label for="manualApiProtocolSelect"><b>协议</b></label>
+          <select id="manualApiProtocolSelect" class="form-input" onchange="window.handleManualProtocolChange && window.handleManualProtocolChange(this.value)">
+            <option value="auto">自动</option>
+            <option value="openai">OpenAI 兼容</option>
+            <option value="gemini">Gemini</option>
+            <option value="claude">Claude</option>
+            <option value="ollama">Ollama</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="margin:0;">
+          <label for="manualApiBaseUrl"><b>API 地址</b></label>
+          <input type="text" id="manualApiBaseUrl" class="form-input" placeholder="https://api.xxx.com/v1" value="" />
+        </div>
+
+        <div class="form-group" style="margin:0;">
+          <label for="manualApiKeyInput"><b>API Key</b></label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="password" id="manualApiKeyInput" class="form-input" style="flex:1;" placeholder="sk-..." value="" />
+            <button type="button" class="btn btn-secondary btn-sm" onclick="window.toggleManualApiKeyVis && window.toggleManualApiKeyVis()">显示</button>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin:0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px;flex-wrap:wrap;">
+            <label for="manualApiModelId" style="margin:0;"><b>模型 ID</b></label>
+            <button type="button" id="btnManualModalFetchModels" class="btn btn-xs btn-secondary" onclick="window.handleManualModalFetchModels && window.handleManualModalFetchModels()" style="color:#818cf8;border-color:rgba(129,140,248,0.4);">拉取</button>
+          </div>
+          <input type="text" id="manualApiModelId" class="form-input" placeholder="deepseek-chat" value="" />
+          <div id="manualModalFetchedListWrap" style="display:none;margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);">
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">点击填入</div>
+            <div id="manualModalFetchedPills" style="display:flex;flex-wrap:wrap;gap:6px;max-height:130px;overflow-y:auto;"></div>
+          </div>
+        </div>
+
+        <div id="manualSavedModelsSection" style="display:none;padding-top:10px;border-top:1px dashed var(--border-color);">
+          <div style="font-size:12.5px;font-weight:600;color:var(--text-dim);margin-bottom:6px;">已添加</div>
+          <div id="manualSavedModelsList" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+        </div>
+      </div>
+      <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('manualApiModal').style.display='none'">取消</button>
+        <button type="button" class="btn btn-primary" onclick="window.handleSaveManualApiAndModel && window.handleSaveManualApiAndModel()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 图片高清查看灯箱 -->
+  <div id="imageLightbox" class="lightbox-overlay" style="display: none;">
+    <img id="lightboxImg" src="" alt="预览" />
+  </div>
+
+  <!-- 全局语言切换下拉菜单（挂载在 body 根级，彻底隔离侧栏/顶栏布局） -->
+  <div id="langDropdownMenu" onclick="event.stopPropagation();" style="display:none;position:fixed;min-width:150px;background:var(--bg-panel, #181b26);border:1px solid var(--border-color, #2d3246);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,0.45);padding:6px;z-index:9999;">
+    <button type="button" class="lang-option-btn" data-lang="zh" onclick="window.setAppLanguage && window.setAppLanguage('zh', event)" style="width:100%;text-align:left;padding:8px 10px;border:none;background:transparent;color:var(--text-main);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:13px;">
+      <span>简体中文</span>
+      <span id="langCheckZh">✓</span>
+    </button>
+    <button type="button" class="lang-option-btn" data-lang="en" onclick="window.setAppLanguage && window.setAppLanguage('en', event)" style="width:100%;text-align:left;padding:8px 10px;border:none;background:transparent;color:var(--text-main);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:13px;">
+      <span>English</span>
+      <span id="langCheckEn" style="display:none;">✓</span>
+    </button>
+  </div>
+
+  <script src="/static/i18n.js?v=36.3"></script>
+  <script src="/static/app.js?v=36.3"></script>
+  <script src="/static/enterprise.js?v=36.3"></script>
+</body>
+</html>

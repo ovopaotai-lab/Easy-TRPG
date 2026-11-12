@@ -1,0 +1,35 @@
+# Runtime user data & backups (never commit personal data)
+data/
+backups/
+
+# Portable Python / Engine runtime & GGUF models (for Release ZIP / Bundle packages)
+runtime/
+engine/
+model/*
+!model/.gitkeep
+models/*
+!models/README.md
+!models/.gitkeep
+!models/**/.gitkeep
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Local tunnels / logs / temp files
+*.log
+*.pid
+*.part
+cloudflared*
+tunnel.py
+.env
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

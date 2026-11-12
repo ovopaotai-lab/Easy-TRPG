@@ -1,0 +1,13 @@
+# 核心 Web 服务与云端/本地 API 依赖（纯 API 版仅需以下 6 项）
+fastapi>=0.110.0
+uvicorn>=0.28.0
+httpx>=0.27.0
+pydantic>=2.6.0
+pillow>=10.0.0
+python-multipart>=0.0.9
+
+# 本地 Strata 推理引擎可选依赖（run.bat / run.sh 在缺少编译环境时会自动回退为仅安装上方 6 项核心包）
+numpy>=1.24.0
+jinja2>=3.1.0
+regex>=2023.0.0
+pyyaml>=6.0
