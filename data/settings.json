@@ -1,0 +1,10 @@
+{
+  "api_protocol": "auto",
+  "base_url": "",
+  "api_key": "",
+  "model": "",
+  "custom_models": [],
+  "proxy": "",
+  "use_proxy": false,
+  "active_project_id": "proj_default"
+}

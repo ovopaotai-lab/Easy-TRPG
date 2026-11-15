@@ -1,0 +1,22 @@
+[
+  {
+    "id": "默认图库",
+    "name": "默认图库",
+    "system": true
+  },
+  {
+    "id": "角色立绘",
+    "name": "角色立绘",
+    "system": false
+  },
+  {
+    "id": "场景CG",
+    "name": "场景CG",
+    "system": false
+  },
+  {
+    "id": "道具线索",
+    "name": "道具线索",
+    "system": false
+  }
+]
