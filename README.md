@@ -33,9 +33,9 @@
 
 | 文件名 | 适合谁？ |
 | :--- | :--- |
-| **[AI跑团工作台_Windows纯净版_alpha1.5.zip](https://huggingface.co/dongfangshuo/Easy-TRPG/resolve/main/AI%E8%B7%91%E5%9B%A2%E5%B7%A5%E4%BD%9C%E5%8F%B0_Windows%E7%BA%AF%E5%87%80%E7%89%88_alpha1.5.zip)** | **推荐下载**。适合有独立显卡的 Windows 电脑（本地跑模型 + 在线 API 都能用）。 |
-| **[AI跑团工作台_API纯净版_alpha1.5.zip](https://huggingface.co/dongfangshuo/Easy-TRPG/resolve/main/AI%E8%B7%91%E5%9B%A2%E5%B7%A5%E4%BD%9C%E5%8F%B0_API%E7%BA%AF%E5%87%80%E7%89%88_alpha1.5.zip)** | 适合没显卡的轻薄本，只连在线 API。 |
-| **[AI跑团工作台_Linux纯净版_alpha1.5.tar.gz](https://huggingface.co/dongfangshuo/Easy-TRPG/resolve/main/AI%E8%B7%91%E5%9B%A2%E5%B7%A5%E4%BD%9C%E5%8F%B0_Linux%E7%BA%AF%E5%87%80%E7%89%88_alpha1.5.tar.gz)** | Linux 系统专用。 |
+| **[AI跑团工作台_Windows纯净版_alpha1.6.zip](https://huggingface.co/dongfangshuo/Easy-TRPG/resolve/main/AI%E8%B7%91%E5%9B%A2%E5%B7%A5%E4%BD%9C%E5%8F%B0_Windows%E7%BA%AF%E5%87%80%E7%89%88_alpha1.6.zip)** | **推荐下载**。适合有独立显卡的 Windows 电脑（本地跑模型 + 在线 API 都能用）。 |
+| **[AI跑团工作台_API纯净版_alpha1.6.zip](https://huggingface.co/dongfangshuo/Easy-TRPG/resolve/main/AI%E8%B7%91%E5%9B%A2%E5%B7%A5%E4%BD%9C%E5%8F%B0_API%E7%BA%AF%E5%87%80%E7%89%88_alpha1.6.zip)** | 适合没显卡的轻薄本，只连在线 API。 |
+| **[AI跑团工作台_Linux纯净版_alpha1.6.tar.gz](https://huggingface.co/dongfangshuo/Easy-TRPG/resolve/main/AI%E8%B7%91%E5%9B%A2%E5%B7%A5%E4%BD%9C%E5%8F%B0_Linux%E7%BA%AF%E5%87%80%E7%89%88_alpha1.6.tar.gz)** | Linux 系统专用。 |
 
 ---
 

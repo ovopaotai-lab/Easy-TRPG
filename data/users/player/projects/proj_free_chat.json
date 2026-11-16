@@ -15,7 +15,7 @@
   "opening_statement": "",
   "suggested_questions": [],
   "prompt_variables": [],
-  "status_panel_enabled": true,
+  "status_panel_enabled": false,
   "status_panel_template": "",
   "ui_modules": [],
   "world_book": [],
@@ -96,5 +96,7 @@
     }
   },
   "created_at": 1729600000.0,
-  "updated_at": 1729600000.0
+  "updated_at": 1729600000.0,
+  "cot_enabled": true,
+  "simple_mode": false
 }

@@ -319,11 +319,175 @@ LOCAL_MODELS_CATALOG: List[Dict[str, Any]] = []
 DISCOVERED_LOCAL_MODELS: Dict[str, Dict[str, Any]] = {}
 _DISCOVERED_MODELS_LOCK = threading.RLock()
 _SPAWNED_ENGINE_PROCS: List[subprocess.Popen] = []
+_WIN32_ENGINE_JOB_HANDLE: Optional[int] = getattr(sys, "_trpg_win32_engine_job_handle", None)
+_WIN32_CONSOLE_CTRL_REF: Any = getattr(sys, "_trpg_win32_console_ctrl_ref", None)
+_ATEWIT_GUARD_REGISTERED: bool = bool(getattr(sys, "_trpg_atexit_guard_registered", False))
 _BUNDLE_ROOT = Path(__file__).parent.resolve()
+
+
+def _ensure_win32_kill_on_close_job() -> Optional[int]:
+    """创建绑定当前进程的 Win32 Job Object (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)：
+    只要本工作台 cmd 窗口被点 [X] 关闭、Ctrl+C 退出或进程被强杀，Windows 内核立即连根清理所有子进程与孙进程（含 strata/serve/server.py + strata.exe + ollama + llama-server）！
+    """
+    global _WIN32_ENGINE_JOB_HANDLE
+    if os.name != "nt":
+        return None
+    if _WIN32_ENGINE_JOB_HANDLE:
+        return _WIN32_ENGINE_JOB_HANDLE
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        JobObjectExtendedLimitInformation = 9
+
+        class _IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class _BASIC_LIMIT(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _EXTENDED_LIMIT(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BASIC_LIMIT),
+                ("IoInfo", _IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        h_job = kernel32.CreateJobObjectW(None, None)
+        if h_job:
+            info = _EXTENDED_LIMIT()
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if kernel32.SetInformationJobObject(h_job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)):
+                _WIN32_ENGINE_JOB_HANDLE = int(h_job)
+                setattr(sys, "_trpg_win32_engine_job_handle", _WIN32_ENGINE_JOB_HANDLE)
+                return _WIN32_ENGINE_JOB_HANDLE
+            kernel32.CloseHandle(h_job)
+    except Exception:
+        pass
+    return None
+
+
+def _register_spawned_engine_proc(proc: Optional[subprocess.Popen]) -> None:
+    """将拉起的本地推理引擎纳入进程树追踪与 Win32 内核级随主窗口同生共死 Job Object"""
+    if proc is None:
+        return
+    _SPAWNED_ENGINE_PROCS.append(proc)
+    if os.name == "nt":
+        h_job = _ensure_win32_kill_on_close_job()
+        proc_handle = getattr(proc, "_handle", None)
+        if h_job and proc_handle:
+            try:
+                import ctypes
+                from ctypes import wintypes
+                kernel32 = ctypes.windll.kernel32
+                kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+                kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+                kernel32.AssignProcessToJobObject(wintypes.HANDLE(h_job), wintypes.HANDLE(int(proc_handle)))
+            except Exception:
+                pass
+
+
+def _linux_pdeathsig_preexec():
+    """Linux 下主服务退出时由内核自动向子引擎发送 SIGKILL"""
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.prctl(1, 9)  # PR_SET_PDEATHSIG, SIGKILL
+    except Exception:
+        pass
+
+
+def shutdown_local_engines_sync() -> None:
+    """同步终止所有由本工作台拉起的本地引擎整棵进程树（含孙进程 strata.exe 等）"""
+    cf = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+    procs = list(_SPAWNED_ENGINE_PROCS)
+    _SPAWNED_ENGINE_PROCS.clear()
+    for proc in procs:
+        try:
+            if proc and proc.poll() is None:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=cf,
+                        timeout=4,
+                    )
+                else:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2.0)
+                    except Exception:
+                        proc.kill()
+        except Exception:
+            pass
+
+
+def _install_process_exit_guards() -> None:
+    global _WIN32_CONSOLE_CTRL_REF, _ATEWIT_GUARD_REGISTERED
+    import atexit
+    if not _ATEWIT_GUARD_REGISTERED:
+        atexit.register(shutdown_local_engines_sync)
+        _ATEWIT_GUARD_REGISTERED = True
+        setattr(sys, "_trpg_atexit_guard_registered", True)
+    if os.name == "nt" and _WIN32_CONSOLE_CTRL_REF is None:
+        _ensure_win32_kill_on_close_job()
+        try:
+            import ctypes
+            from ctypes import wintypes
+            HANDLER_TYPE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+            def _ctrl_handler(ctrl_type: int) -> bool:
+                # 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE (点右上角 X 关闭 cmd 窗口), 5=LOGOFF, 6=SHUTDOWN
+                if ctrl_type in (0, 1, 2, 5, 6):
+                    ee_curr = sys.modules.get("enterprise_engine")
+                    fn = getattr(ee_curr, "shutdown_local_engines_sync", None) or shutdown_local_engines_sync
+                    fn()
+                return False
+
+            _WIN32_CONSOLE_CTRL_REF = HANDLER_TYPE(_ctrl_handler)
+            setattr(sys, "_trpg_win32_console_ctrl_ref", _WIN32_CONSOLE_CTRL_REF)
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(_WIN32_CONSOLE_CTRL_REF, True)
+        except Exception:
+            pass
+
+
+_install_process_exit_guards()
 _CUSTOM_PATHS_FILE = _BUNDLE_ROOT / "data" / "custom_model_paths.json"
 _ENGINE_LOGS_DIR = _BUNDLE_ROOT / "data" / "engine_logs"
 _ACTIVE_STRATA_PORT: int = 8080
-_ACTIVE_LLAMA_PORT: int = 11434
+_ACTIVE_LLAMA_PORT: int = 11435
+_ACTIVE_LLAMA_MODEL: str = ""
+_ACTIVE_LLAMA_CTX: int = 0
 HF_DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
 HF_DOWNLOAD_ASYNC_TASKS: Dict[str, asyncio.Task] = {}
 
@@ -337,7 +501,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-v4",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-v4 (Q3_K_M)",
         "quant": "Q3_K_M",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": True,
         "vram_hint": "推荐配置：12G~16G显存 + 16G内存（16G全显存高速长团首选）",
         "desc": "",
@@ -354,7 +518,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-v4",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-v4 (Q4_K_M)",
         "quant": "Q4_K_M",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": True,
         "vram_hint": "推荐配置：24G显存，或 16G显存 + 32G内存（混合卸载）",
         "desc": "",
@@ -371,7 +535,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-v4",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-v4 (Q5_K_M)",
         "quant": "Q5_K_M",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：24G显存 + 32G内存",
         "desc": "",
@@ -388,7 +552,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-v4",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-v4 (Q6_K)",
         "quant": "Q6_K",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：24G~32G显存 + 32G内存",
         "desc": "",
@@ -405,7 +569,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-v4",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-v4 (Q8_0)",
         "quant": "Q8_0",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：32G+显存 + 32G内存",
         "desc": "",
@@ -422,7 +586,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-Novel",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-Novel (Q3_K_M)",
         "quant": "Q3_K_M",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：16G显存 + 16G内存",
         "desc": "",
@@ -439,7 +603,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-Novel",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-Novel (Q4_K_M)",
         "quant": "Q4_K_M",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：16G~24G显存 + 16G内存",
         "desc": "",
@@ -456,7 +620,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-Novel",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-Novel (Q5_K_M)",
         "quant": "Q5_K_M",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：24G显存 + 32G内存",
         "desc": "",
@@ -473,7 +637,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-Novel",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-Novel (Q6_K)",
         "quant": "Q6_K",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：24G~32G显存 + 32G内存",
         "desc": "",
@@ -490,7 +654,7 @@ HF_PRESET_CATALOG: List[Dict[str, Any]] = [
         "repo_id": "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-Novel",
         "name": "Dongfangshuo-Qwen3.8-27B-NSFW-Novel (Q8_0)",
         "quant": "Q8_0",
-        "engine": "ollama",
+        "engine": "llama",
         "recommended": False,
         "vram_hint": "推荐配置：32G+显存 + 32G内存",
         "desc": "",
@@ -687,11 +851,70 @@ def save_custom_model_paths(paths: List[str]) -> List[str]:
     return cleaned
 
 
+def _find_host_strata_dirs() -> Tuple[List[Path], List[Path]]:
+    """
+    自动探测本机已安装的外部 Strata 根目录与 data 数据目录（与 Ollama 自动读取 ~/.ollama/models 对齐）：
+    支持读取官方 Strata 配置文件 (%APPDATA%/Strata/settings.json 或 ~/.config/Strata/settings.json) 及常见盘符 Strata 目录。
+    可通过环境变量 STRATA_NO_HOST_FALLBACK=1 关闭宿主机回退探测。
+    """
+    if os.environ.get("STRATA_NO_HOST_FALLBACK") == "1":
+        return [], []
+    install_dirs: List[Path] = []
+    data_dirs: List[Path] = []
+
+    cfg_candidates: List[Path] = []
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA", "").strip()
+        if appdata:
+            cfg_candidates.append(Path(appdata) / "Strata" / "settings.json")
+    else:
+        cfg_candidates.append(Path.home() / ".config" / "Strata" / "settings.json")
+        cfg_candidates.append(Path.home() / "Library" / "Application Support" / "Strata" / "settings.json")
+
+    for cfg_p in cfg_candidates:
+        if cfg_p.exists() and cfg_p.is_file():
+            try:
+                sdata = json.loads(cfg_p.read_text(encoding="utf-8", errors="ignore"))
+                if isinstance(sdata, dict):
+                    dd = str(sdata.get("data_dir") or "").strip()
+                    if dd and Path(dd).exists():
+                        data_dirs.append(Path(dd))
+                    for inst in (sdata.get("installs") or []):
+                        inst_s = str(inst or "").strip()
+                        if inst_s and Path(inst_s).exists():
+                            install_dirs.append(Path(inst_s))
+            except Exception:
+                pass
+
+    extra_roots = [Path.home() / "Strata", Path.home() / ".strata"]
+    if os.name == "nt":
+        b_drive = _BUNDLE_ROOT.drive or "D:"
+        for drv in dict.fromkeys([b_drive, "D:", "C:", "E:", "F:"]):
+            extra_roots.append(Path(f"{drv}/Strata"))
+    for cand in extra_roots:
+        try:
+            if cand.exists() and cand.is_dir() and cand not in install_dirs:
+                install_dirs.append(cand)
+        except Exception:
+            pass
+
+    for inst_d in list(install_dirs):
+        cand_data = inst_d / "data"
+        try:
+            if cand_data.exists() and cand_data.is_dir() and cand_data not in data_dirs:
+                data_dirs.append(cand_data)
+        except Exception:
+            pass
+
+    return install_dirs, data_dirs
+
+
 def _find_strata_roots() -> List[Path]:
-    """按优先级查找整合版内置 engine/strata、model、models 目录（及 Flash-Next 子目录）与环境变量 STRATA_DIR"""
+    """按优先级查找整合版内置 engine/strata、model、models 目录、环境变量 STRATA_DIR 及本机已安装的 Strata 目录"""
     _ensure_bundle_model_dirs()
     roots: List[Path] = []
     env_strata = os.environ.get("STRATA_DIR", "").strip()
+    host_installs, _ = _find_host_strata_dirs()
     candidates = [
         _BUNDLE_ROOT / "engine" / "strata",
         _BUNDLE_ROOT / "model" / "Flash-Next",
@@ -701,9 +924,17 @@ def _find_strata_roots() -> List[Path]:
     ]
     if env_strata:
         candidates.append(Path(env_strata))
+    candidates.extend(host_installs)
+    seen_real = set()
     for candidate in candidates:
-        if candidate.exists() and candidate not in roots:
-            roots.append(candidate)
+        if candidate.exists():
+            try:
+                rk = str(Path(os.path.realpath(candidate))).lower()
+            except Exception:
+                rk = str(candidate).lower()
+            if rk not in seen_real:
+                seen_real.add(rk)
+                roots.append(candidate)
     return roots
 
 
@@ -750,8 +981,8 @@ def _file_identity_key(p: Path) -> str:
         return f"raw:{str(p).lower()}"
 
 
-def _iter_gguf_in_path(target: Path, max_depth: int = 2) -> List[Path]:
-    """在指定文件或目录（最多向下递归 max_depth 层，自动跳过 ollama_models 内部缓存）中收集所有 .gguf 文件"""
+def _iter_gguf_in_path(target: Path, max_depth: int = 4) -> List[Path]:
+    """在指定文件或目录（最多向下递归 max_depth 层，自动跳过内部缓存与微型测试样本）中收集所有有效 .gguf 文件"""
     found: List[Path] = []
     if not target.exists():
         return found
@@ -760,7 +991,11 @@ def _iter_gguf_in_path(target: Path, max_depth: int = 2) -> List[Path]:
             found.append(target)
         return found
 
-    skip_dirs = {"ollama_models", "blobs", "manifests", ".git", ".cache", "__pycache__", ".venv", "runtime", "static", "backups"}
+    skip_dirs = {
+        "ollama_models", "blobs", "manifests", ".git", ".cache", "__pycache__", ".venv",
+        "runtime", "static", "backups", "tests", "experimental-speed-projection",
+        "dflash2-tuned", "dsv41", "packs", "quant_quality",
+    }
 
     def _walk(cur_dir: Path, depth: int):
         try:
@@ -770,7 +1005,11 @@ def _iter_gguf_in_path(target: Path, max_depth: int = 2) -> List[Path]:
         for entry in entries:
             try:
                 if entry.is_file():
-                    if entry.suffix.lower() == ".gguf" and not entry.name.endswith(".part"):
+                    low_en = entry.name.lower()
+                    if entry.suffix.lower() == ".gguf" and not low_en.endswith(".part"):
+                        # 过滤低于 20MB 的非 mmproj 测试文件头/速度探针样本，防止误判为可用主模型
+                        if "mmproj" not in low_en and entry.stat().st_size < 20 * 1024 * 1024:
+                            continue
                         found.append(entry)
                 elif entry.is_dir() and depth < max_depth and entry.name not in skip_dirs:
                     _walk(entry, depth + 1)
@@ -854,13 +1093,15 @@ def _check_gguf_shards_complete(first_shard: Path) -> Tuple[bool, str]:
 def _find_best_mmproj_for_gguf(gguf_path: Path, is_flash_next: bool, all_mmprojs: List[Path]) -> str:
     """为指定 GGUF 自动匹配最佳视觉编码器 (mmproj*.gguf)"""
     candidates: List[Path] = []
-    for search_dir in (
+    _, _host_strata_data = _find_host_strata_dirs()
+    for search_dir in [
         gguf_path.parent,
         gguf_path.parent.parent if gguf_path.parent != _BUNDLE_ROOT else None,
         _BUNDLE_ROOT / "model",
         _BUNDLE_ROOT / "models",
         _BUNDLE_ROOT / "engine" / "strata" / "data" / "models",
-    ):
+        *[d / "models" for d in _host_strata_data],
+    ]:
         if search_dir and search_dir.exists() and search_dir.is_dir():
             try:
                 for p in sorted(search_dir.glob("*mmproj*.gguf")):
@@ -904,10 +1145,12 @@ def _locate_gguf_anywhere(filename_or_path: str, custom_paths: Optional[List[str
     if raw_p.exists() and raw_p.is_file():
         return raw_p
     target_name = raw_p.name.lower()
+    _, _host_strata_data = _find_host_strata_dirs()
     search_roots = [
         _BUNDLE_ROOT / "model",
         _BUNDLE_ROOT / "models",
         _BUNDLE_ROOT / "engine" / "strata" / "data" / "models",
+        *[d / "models" for d in _host_strata_data],
     ]
     for cp in load_saved_custom_model_paths(custom_paths):
         p = Path(cp)
@@ -1046,9 +1289,8 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
         if gp and Path(gp).exists():
             strata_by_file_key[_file_identity_key(Path(gp))] = sm
 
-    # 1. 预读取本地 Ollama manifests 离线列表（先尝试将 model/ 下标准 27B-v4-Q4_K_M 零拷贝硬链接至 ollama_models，再校验主模型 blob 是否真实存在）
-    # 注意：整合包自身 model/ 与 models/ 文件夹中的模型优先级高于外部宿主机 ~/.ollama 历史残留模型，因此外部 manifests 延后追加
-    _auto_link_discovered_v4_q4(custom_paths)
+    # 1. 预读取本地 Ollama manifests 离线列表（若内置原生 llama-server 可用且主模型 blob 为有效 GGUF，直接零拷贝挂载至原生 Llama 引擎运行）
+    has_native_llama = _find_bundled_llama_server_exe() is not None
     ollama_manifest_by_from_name: Dict[str, Dict[str, Any]] = {}
     pending_ollama_manifests: List[Dict[str, Any]] = []
     seen_manifest_ids = set()
@@ -1069,6 +1311,8 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
                     from_gguf_name = ""
                     blob_ok = True
                     has_projector = False
+                    model_blob_path: Optional[Path] = None
+                    proj_blob_path: Optional[Path] = None
                     try:
                         mf_data = json.loads(tag_file.read_text(encoding="utf-8"))
                         for layer in mf_data.get("layers", []):
@@ -1080,36 +1324,50 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
                                     from_gguf_name = Path(from_path).name.lower()
                                 if digest.startswith("sha256:") and blobs_dir.exists():
                                     blob_file = blobs_dir / f"sha256-{digest[7:]}"
-                                    if not blob_file.exists():
+                                    if blob_file.exists():
+                                        model_blob_path = blob_file
+                                    else:
                                         blob_ok = False
                             elif mtype == "application/vnd.ollama.image.projector":
                                 p_digest = str(layer.get("digest") or "")
                                 if p_digest.startswith("sha256:") and blobs_dir.exists():
-                                    if (blobs_dir / f"sha256-{p_digest[7:]}").exists():
+                                    pf = blobs_dir / f"sha256-{p_digest[7:]}"
+                                    if pf.exists():
                                         has_projector = True
+                                        proj_blob_path = pf
                                 else:
                                     has_projector = True
                     except Exception:
                         pass
                     if not blob_ok and not _locate_gguf_anywhere(from_gguf_name, custom_paths):
                         continue
+                    is_gguf_blob = False
+                    if model_blob_path and model_blob_path.is_file():
+                        try:
+                            with open(model_blob_path, "rb") as bfh:
+                                is_gguf_blob = bfh.read(4) == b"GGUF"
+                        except Exception:
+                            is_gguf_blob = False
+                    use_native_llama_mf = bool(has_native_llama and is_gguf_blob and model_blob_path)
                     seen_manifest_ids.add(mid)
                     meta = {
                         "id": mid,
                         "aliases": [],
-                        "name": f"{mid} 【本地 · Ollama 11434】",
+                        "name": f"{mid} 【本地 · {'Llama' if use_native_llama_mf else 'Ollama 11434'}】",
                         "group": "Local",
-                        "engine": "ollama",
-                        "base_url": "http://127.0.0.1:11434/v1",
+                        "engine": "llama" if use_native_llama_mf else "ollama",
+                        "base_url": f"http://127.0.0.1:{_ACTIVE_LLAMA_PORT}/v1" if use_native_llama_mf else "http://127.0.0.1:11434/v1",
                         "api_key": "local",
                         "upstream_model": mid,
+                        "gguf_path": str(model_blob_path.absolute()) if (use_native_llama_mf and model_blob_path) else "",
+                        "mmproj_path": str(proj_blob_path.absolute()) if (use_native_llama_mf and proj_blob_path) else "",
                         "shards_complete": True,
                         "shard_warning": "",
                         "supports_vision": has_projector,
                         "billing_type": "local",
                         "short_price": "本地",
-                        "detail_price": "本地运行 (Ollama 11434)",
-                        "description": "本地 Ollama 引擎模型"
+                        "detail_price": f"本地运行 ({'原生 Llama' if use_native_llama_mf else 'Ollama 11434'})",
+                        "description": "原生 Llama 引擎模型" if use_native_llama_mf else "本地 Ollama 引擎模型",
                     }
                     if from_gguf_name and from_gguf_name not in ollama_manifest_by_from_name:
                         ollama_manifest_by_from_name[from_gguf_name] = meta
@@ -1117,11 +1375,17 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
                         DISCOVERED_LOCAL_MODELS[mid] = meta
                     pending_ollama_manifests.append(meta)
 
-    # 2. 最优先扫描 model/、models/ 与用户自定义挂载路径下的所有 .gguf 文件（即插即用，支持 Flash-Next 与 27B）
+    # 2. 最优先扫描 model/、models/、内置及本机 Strata 模型库与用户自定义挂载路径下的所有 .gguf 文件（即插即用，支持 Flash-Next 与 27B）
+    _, host_strata_data_dirs = _find_host_strata_dirs()
     scan_sources: List[Tuple[Path, str]] = [
         (_BUNDLE_ROOT / "model", "model文件夹"),
         (_BUNDLE_ROOT / "models", "model文件夹"),
+        (_BUNDLE_ROOT / "engine" / "strata" / "data" / "models", "Strata模型库"),
     ]
+    for hdd in host_strata_data_dirs:
+        hm_dir = hdd / "models"
+        if hm_dir.exists():
+            scan_sources.append((hm_dir, "本机Strata"))
     for cp in load_saved_custom_model_paths(custom_paths):
         p = Path(cp)
         if p.exists():
@@ -1130,7 +1394,7 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
     all_discovered_ggufs: List[Tuple[Path, str]] = []
     all_mmprojs: List[Path] = []
     for src_path, src_label in scan_sources:
-        for gfile in _iter_gguf_in_path(src_path, max_depth=2):
+        for gfile in _iter_gguf_in_path(src_path, max_depth=4):
             if "mmproj" in gfile.name.lower():
                 if gfile not in all_mmprojs:
                     all_mmprojs.append(gfile)
@@ -1206,12 +1470,15 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
                 DISCOVERED_LOCAL_MODELS[f"{mid.lower()}:local"] = meta
             results.append(meta)
         else:
-            # 27B 或常规单文件 GGUF (Ollama 引擎)
+            # 27B 或常规单文件 GGUF（优先走内置原生 Llama 引擎，无内置时回退系统 Ollama）
             slug = re.sub(r"[^a-zA-Z0-9_\-\.]", "-", clean_stem).strip("-").lower()
             local_alias = f"{slug}:local"
-            # 若该 GGUF 已在 ollama_models 中注册过（如 dongfangshuo-v4:q4），将文件路径绑定到该模型并优先排入结果列表
+            eng_choice = "llama" if has_native_llama else "ollama"
+            base_choice = f"http://127.0.0.1:{_ACTIVE_LLAMA_PORT}/v1" if has_native_llama else "http://127.0.0.1:11434/v1"
             if fname_low in ollama_manifest_by_from_name:
                 existing_om = ollama_manifest_by_from_name[fname_low]
+                existing_om["engine"] = eng_choice
+                existing_om["base_url"] = base_choice
                 existing_om["gguf_path"] = str(gguf_path.absolute())
                 existing_om["shards_complete"] = shards_ok
                 existing_om["shard_warning"] = shard_warn
@@ -1234,6 +1501,8 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
             if mid in seen_ids:
                 with _DISCOVERED_MODELS_LOCK:
                     if mid in DISCOVERED_LOCAL_MODELS:
+                        DISCOVERED_LOCAL_MODELS[mid]["engine"] = eng_choice
+                        DISCOVERED_LOCAL_MODELS[mid]["base_url"] = base_choice
                         DISCOVERED_LOCAL_MODELS[mid]["gguf_path"] = str(gguf_path.absolute())
                         DISCOVERED_LOCAL_MODELS[mid]["shards_complete"] = shards_ok
                         DISCOVERED_LOCAL_MODELS[mid]["shard_warning"] = shard_warn
@@ -1247,8 +1516,8 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
                 "aliases": [clean_stem],
                 "name": f"{clean_stem} ({mid}) 【本地 · {src_label}】",
                 "group": "Local",
-                "engine": "ollama",
-                "base_url": "http://127.0.0.1:11434/v1",
+                "engine": eng_choice,
+                "base_url": base_choice,
                 "api_key": "local",
                 "upstream_model": mid,
                 "gguf_path": str(gguf_path.absolute()),
@@ -1260,14 +1529,20 @@ def _scan_local_models_folder(custom_paths: Optional[List[str]] = None, force_re
                 "billing_type": "local",
                 "short_price": "本地",
                 "detail_price": f"本地运行 ({src_label}/{gguf_path.name})",
-                "description": f"{src_label} 直载模型 ({gguf_path.name})"
+                "description": f"{src_label} 原生直载模型 ({gguf_path.name})"
             }
             with _DISCOVERED_MODELS_LOCK:
                 DISCOVERED_LOCAL_MODELS[mid] = meta
                 DISCOVERED_LOCAL_MODELS[clean_stem] = meta
             results.append(meta)
 
-    # 3. 追加其余未绑定整合包 model/ 目录 GGUF 的本机 Ollama manifests 模型
+    # 3. 追加本机或内置 Strata 配置文件中指向外部有效 GGUF 但未在目录直扫中出现的 Flash-Next 模型
+    for sm in strata_configs:
+        if sm["id"] not in seen_ids:
+            seen_ids.add(sm["id"])
+            results.append(sm)
+
+    # 4. 追加其余未绑定整合包 model/ 目录 GGUF 的本机 Ollama manifests 模型
     for om in pending_ollama_manifests:
         if om["id"] not in seen_ids:
             seen_ids.add(om["id"])
@@ -1313,7 +1588,7 @@ def get_local_model_meta(
                 return item
     if any(tag in low for tag in (":q3", ":q4", ":q5", ":q6", ":q8", ":latest", ":fp16", ":local")):
         for item in discovered_snapshot + scanned:
-            if item.get("engine") == "ollama" and str(item.get("id") or "").lower() == low:
+            if item.get("engine") in ("llama", "ollama") and str(item.get("id") or "").lower() == low:
                 return item
         if allow_synthetic_ollama:
             return {
@@ -1344,11 +1619,7 @@ def get_installed_local_model_ids(custom_paths: Optional[List[str]] = None) -> L
 
 
 def _find_system_ollama_exe() -> Optional[Path]:
-    """优先查找整合包内置 engine/ollama/ollama.exe，其次查找系统已安装的 Ollama"""
-    for cand_rel in ("ollama.exe", "ollama"):
-        bundled = _BUNDLE_ROOT / "engine" / "ollama" / cand_rel
-        if bundled.exists():
-            return bundled
+    """查找系统已安装的外部 Ollama（仅作为无 GGUF 纯外部 Ollama 模型兜底）"""
     if os.environ.get("OLLAMA_NO_HOST_FALLBACK") == "1":
         return None
     import shutil as _shutil
@@ -1366,11 +1637,15 @@ def _find_system_ollama_exe() -> Optional[Path]:
 
 
 def _find_bundled_llama_server_exe() -> Optional[Path]:
-    """查找内置 engine/llama/llama-server(.exe) 或系统 PATH 中的 llama-server（用于无 Ollama 环境如 Linux 云服务器直跑 27B GGUF）"""
+    """查找整合包内置 engine/llama/llama-server(.exe)、兼容旧目录 engine/ollama/lib/ollama/llama-server(.exe) 或系统 PATH"""
+    exe_name = "llama-server.exe" if os.name == "nt" else "llama-server"
     for cand in (
-        _BUNDLE_ROOT / "engine" / "llama" / ("llama-server.exe" if os.name == "nt" else "llama-server"),
+        _BUNDLE_ROOT / "engine" / "llama" / exe_name,
         _BUNDLE_ROOT / "engine" / "llama" / "llama-server",
         _BUNDLE_ROOT / "engine" / "llama" / "llama-server.exe",
+        _BUNDLE_ROOT / "engine" / "ollama" / "lib" / "ollama" / exe_name,
+        _BUNDLE_ROOT / "engine" / "ollama" / "lib" / "ollama" / "llama-server",
+        _BUNDLE_ROOT / "engine" / "ollama" / "lib" / "ollama" / "llama-server.exe",
     ):
         if cand.exists():
             if os.name != "nt":
@@ -1386,8 +1661,252 @@ def _find_bundled_llama_server_exe() -> Optional[Path]:
     return None
 
 
-async def _try_auto_wake_ollama() -> bool:
-    """当主动调用本地 Ollama 模型但服务未启动时，后台无窗口拉起 ollama serve"""
+_CACHED_LLAMA_BACKEND_INFO: Optional[Dict[str, str]] = None
+
+
+def _select_adaptive_llama_backend(llama_exe: Path) -> Dict[str, str]:
+    """自动探测并选择当前硬件最优的 GGML 计算后端：
+    NVIDIA CUDA 13 -> AMD/Intel/旧驱动N卡 Vulkan -> CPU 多架构 SIMD (Zen4/AVX512/AVX2)
+    """
+    global _CACHED_LLAMA_BACKEND_INFO
+    if _CACHED_LLAMA_BACKEND_INFO is not None and _CACHED_LLAMA_BACKEND_INFO.get("exe") == str(llama_exe):
+        return dict(_CACHED_LLAMA_BACKEND_INFO)
+
+    ls_dir = llama_exe.parent
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+    si = None
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        si.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+
+    def _probe_backend_dll(dll_path: Path, expect_prefix: str) -> bool:
+        if not dll_path.exists():
+            return False
+        p_env = os.environ.copy()
+        path_parts = [str(dll_path.parent), str(ls_dir), p_env.get("PATH", "")]
+        p_env["PATH"] = (";" if os.name == "nt" else ":").join(x for x in path_parts if x)
+        p_env["GGML_BACKEND_PATH"] = str(dll_path)
+        try:
+            r = subprocess.run(
+                [str(llama_exe), "--list-devices"],
+                env=p_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=creation_flags,
+                startupinfo=si,
+                timeout=4.0,
+            )
+            out = (r.stdout or "") + "\n" + (r.stderr or "")
+            return expect_prefix.lower() in out.lower()
+        except Exception:
+            return False
+
+    backend_name = "cpu"
+    backend_dll = ""
+    extra_bin_dir = ""
+
+    if os.name == "nt":
+        cuda_cands = [
+            ls_dir / "cuda_v13" / "ggml-cuda.dll",
+            ls_dir / "cuda_v12" / "ggml-cuda.dll",
+            ls_dir / "ggml-cuda.dll",
+        ]
+        vk_cands = [
+            ls_dir / "vulkan" / "ggml-vulkan.dll",
+            ls_dir / "ggml-vulkan.dll",
+        ]
+        cuda_info = _probe_cuda_driver_info()
+        if cuda_info.get("has_nvidia_cuda"):
+            for cdll in cuda_cands:
+                if cdll.exists() and _probe_backend_dll(cdll, "cuda0"):
+                    backend_name = "cuda"
+                    backend_dll = str(cdll)
+                    extra_bin_dir = str(cdll.parent)
+                    break
+        if backend_name == "cpu":
+            for vdll in vk_cands:
+                if vdll.exists() and _probe_backend_dll(vdll, "vulkan0"):
+                    backend_name = "vulkan"
+                    backend_dll = str(vdll)
+                    extra_bin_dir = str(vdll.parent)
+                    break
+    else:
+        for cso in (ls_dir / "libggml-cuda.so", ls_dir / "ggml-cuda.so"):
+            if cso.exists() and _probe_backend_dll(cso, "cuda0"):
+                backend_name = "cuda"
+                backend_dll = str(cso)
+                extra_bin_dir = str(cso.parent)
+                break
+        if backend_name == "cpu":
+            for vso in (ls_dir / "libggml-vulkan.so", ls_dir / "ggml-vulkan.so"):
+                if vso.exists() and _probe_backend_dll(vso, "vulkan0"):
+                    backend_name = "vulkan"
+                    backend_dll = str(vso)
+                    extra_bin_dir = str(vso.parent)
+                    break
+
+    res = {
+        "exe": str(llama_exe),
+        "backend": backend_name,
+        "backend_dll": backend_dll,
+        "extra_bin_dir": extra_bin_dir,
+    }
+    _CACHED_LLAMA_BACKEND_INFO = dict(res)
+    return res
+
+
+def _build_adaptive_llama_launch_plan(
+    llama_exe: Path,
+    gguf_path: Path,
+    model_alias: str,
+    port: int,
+    mmproj_path: str = "",
+    req_parallel: int = 1,
+    slot_ctx_tokens: int = 0,
+) -> Tuple[List[str], Dict[str, str], Dict[str, Any]]:
+    """根据本机物理显存、系统内存、CPU 线程数与请求并发路数，全自动规划原生 llama-server 最优参数"""
+    bk = _select_adaptive_llama_backend(llama_exe)
+    has_gpu = bk["backend"] in ("cuda", "vulkan")
+    vram_mib = detect_gpu_vram_mib() if has_gpu else 0
+    sys_ram_gib = _detect_system_ram_gib() or 16
+    eff_par = max(1, min(16, int(req_parallel or 1)))
+
+    # 1. 自适应预填充批大小 (-b / -ub)：彻底解除 Ollama 512 锁死，高显存卡吃满 Tensor Core，低显存卡防爆显存
+    if vram_mib >= 28000:
+        batch_sz = 4096
+        ubatch_sz = 2048 if eff_par <= 4 else 1024
+    elif vram_mib >= 20000:
+        batch_sz = 2048
+        ubatch_sz = 1024 if eff_par <= 4 else 512
+    elif vram_mib >= 14000:
+        batch_sz = 2048
+        ubatch_sz = 512
+    else:
+        batch_sz = 1024
+        ubatch_sz = 512
+
+    # 2. 自适应 KV 缓存池大小 (-c)、统一分页共享池 (-kvu) 与量化精度 (-ctk / -ctv)
+    if eff_par == 1:
+        base_ctx = get_optimal_ollama_num_ctx(96, str(gguf_path))
+        total_ctx = max(base_ctx, int(slot_ctx_tokens or 0))
+        kv_type = "q8_0" if (vram_mib >= 14000 or not has_gpu) else "q4_0"
+    else:
+        per_slot = max(8192, int(slot_ctx_tokens or 41984))
+        total_ctx = min(524288, per_slot * eff_par)
+        # 多路大池或中低显存自动切换 q4_0 KV 缓存，使单卡可容纳翻倍并发槽位
+        kv_type = "q8_0" if (vram_mib >= 28000 and total_ctx <= 185000) else "q4_0"
+
+    # 3. 自适应显存安全余量 (--fit-target) 与内存前缀缓存池 (--cache-ram)
+    fit_margin_mib = 1024 if vram_mib >= 20000 else (768 if vram_mib >= 12000 else 512)
+    forced_vram = os.environ.get("FORCE_GPU_VRAM_MIB", "").strip()
+    if forced_vram.isdigit() and int(forced_vram) > 0:
+        phys_vram = _detect_physical_gpu_vram_mib()
+        if phys_vram > int(forced_vram) + 512:
+            fit_margin_mib = max(1024, phys_vram - int(forced_vram) + 1024)
+
+    cache_ram_mib = 8192 if sys_ram_gib >= 48 else (4096 if sys_ram_gib >= 24 else 1024)
+    http_threads = max(8, eff_par + 4)
+
+    cmd: List[str] = [
+        str(llama_exe),
+        "-m", str(gguf_path),
+        "-a", str(model_alias),
+        "--host", "127.0.0.1",
+        "--port", str(port),
+        "--no-webui",
+        "-c", str(total_ctx),
+        "-np", str(eff_par),
+        "-b", str(batch_sz),
+        "-ub", str(ubatch_sz),
+        "-ctk", kv_type,
+        "-ctv", kv_type,
+        "--no-reasoning-preserve",
+        "--cache-ram", str(cache_ram_mib),
+        "--threads-http", str(http_threads),
+        "--repeat-penalty", "1.03",
+        "--repeat-last-n", "1024",
+        "--presence-penalty", "0.10",
+        "--frequency-penalty", "0.0",
+        "--dry-multiplier", "0.8",
+        "--dry-base", "1.75",
+        "--dry-allowed-length", "2",
+        "--dry-penalty-last-n", "1024",
+    ]
+    if eff_par > 1:
+        cmd.append("-kvu")
+    if has_gpu:
+        cmd.extend(["-fa", "on", "--fit", "on", "--fit-target", str(fit_margin_mib)])
+    else:
+        cpu_cnt = os.cpu_count() or 8
+        phys_est = max(2, cpu_cnt // 2) if cpu_cnt >= 8 else max(1, cpu_cnt)
+        cmd.extend(["-ngl", "0", "-t", str(phys_est), "-tb", str(max(phys_est, cpu_cnt - 1))])
+
+    # 单人跑团模式自动挂载多模态视觉投影器；多路纯文本并发压测跳过投影器腾出 ~1.1 GiB 显存给 KV 槽位
+    use_mmproj = bool(eff_par == 1 and mmproj_path and Path(mmproj_path).exists())
+    if use_mmproj:
+        cmd.extend(["--mmproj", str(mmproj_path)])
+        if not has_gpu or vram_mib < 22000:
+            cmd.append("--no-mmproj-offload")
+
+    ls_env = os.environ.copy()
+    ls_dir_str = str(llama_exe.parent)
+    if bk["backend_dll"]:
+        ls_env["GGML_BACKEND_PATH"] = bk["backend_dll"]
+    if os.name == "nt":
+        path_items = [p for p in (bk["extra_bin_dir"], ls_dir_str, ls_env.get("PATH", "")) if p]
+        ls_env["PATH"] = ";".join(path_items)
+    else:
+        strata_eng_dir = str(_BUNDLE_ROOT / "engine" / "strata" / "engine")
+        old_ld = ls_env.get("LD_LIBRARY_PATH", "")
+        ld_items = [
+            p for p in (
+                bk["extra_bin_dir"],
+                ls_dir_str,
+                strata_eng_dir,
+                "/usr/local/nvidia/lib64",
+                "/usr/local/nvidia/lib",
+                "/usr/local/cuda/lib64",
+                "/usr/lib/x86_64-linux-gnu",
+                old_ld,
+            )
+            if p
+        ]
+        ls_env["LD_LIBRARY_PATH"] = ":".join(ld_items)
+
+    plan_meta = {
+        "backend": bk["backend"],
+        "vram_mib": vram_mib,
+        "total_ctx": total_ctx,
+        "parallel": eff_par,
+        "batch": batch_sz,
+        "ubatch": ubatch_sz,
+        "kv_type": kv_type,
+        "mmproj": use_mmproj,
+    }
+    return cmd, ls_env, plan_meta
+
+
+def _set_active_llama_port(new_port: int) -> None:
+    """更新当前原生 llama-server 监听端口，并同步刷新内存中已发现的本地 Llama 模型地址"""
+    global _ACTIVE_LLAMA_PORT
+    _ACTIVE_LLAMA_PORT = int(new_port)
+    with _DISCOVERED_MODELS_LOCK:
+        for _, m in DISCOVERED_LOCAL_MODELS.items():
+            if isinstance(m, dict) and m.get("engine") == "llama":
+                m["base_url"] = f"http://127.0.0.1:{_ACTIVE_LLAMA_PORT}/v1"
+
+
+_ACTIVE_OLLAMA_PARALLEL: int = 1
+_ACTIVE_STRATA_PARALLEL: int = 1
+_ACTIVE_LLAMA_PARALLEL: int = 1
+
+
+async def _try_auto_wake_ollama(parallel_slots: int = 1) -> bool:
+    """仅当用户选择纯外部系统 Ollama 模型（无本地 GGUF）时，后台拉起系统 ollama serve"""
+    global _ACTIVE_OLLAMA_PARALLEL
     ollama_exe = _find_system_ollama_exe()
     if not ollama_exe:
         return False
@@ -1404,20 +1923,22 @@ async def _try_auto_wake_ollama() -> bool:
     env.setdefault("OLLAMA_HOST", "127.0.0.1:11434")
     env.setdefault("OLLAMA_FLASH_ATTENTION", "1")
     env.setdefault("OLLAMA_KV_CACHE_TYPE", "q8_0")
-    forced_vram = os.environ.get("FORCE_GPU_VRAM_MIB", "").strip()
-    if forced_vram.isdigit() and int(forced_vram) > 0:
-        phys_vram = _detect_physical_gpu_vram_mib()
-        if phys_vram > int(forced_vram) + 512:
-            env.setdefault("LLAMA_ARG_FIT_TARGET", str(max(1024, phys_vram - int(forced_vram) + 1200)))
+    eff_par = max(1, min(16, int(parallel_slots or 1)))
+    if eff_par > 1:
+        env["OLLAMA_NUM_PARALLEL"] = str(eff_par)
+        env["OLLAMA_MAX_QUEUE"] = "64"
+    _ACTIVE_OLLAMA_PARALLEL = eff_par
     try:
-        subprocess.Popen(
+        ol_proc = subprocess.Popen(
             [str(ollama_exe), "serve"],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
-            startupinfo=si
+            startupinfo=si,
+            preexec_fn=_linux_pdeathsig_preexec if os.name != "nt" else None,
         )
+        _register_spawned_engine_proc(ol_proc)
     except Exception:
         return False
 
@@ -1476,10 +1997,11 @@ async def discover_local_models(settings: Optional[Dict[str, Any]] = None) -> Li
             ("strata", f"http://127.0.0.1:{sp}/v1", f"http://127.0.0.1:{sp}/v1/models", f"Strata {sp}")
             for sp in strata_probe_ports
         ]
-        if (_BUNDLE_ROOT / "engine" / "ollama" / "ollama.exe").exists() or _find_bundled_llama_server_exe() is not None or os.environ.get("OLLAMA_NO_HOST_FALLBACK") != "1":
-            probes.append(("ollama", "http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/api/tags", "Ollama 11434"))
-            probes.append(("ollama", "http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1/models", "LlamaServer 11434"))
+        llama_probe_ports = list(dict.fromkeys([_ACTIVE_LLAMA_PORT, 11435]))
+        for lp in llama_probe_ports:
+            probes.append(("llama", f"http://127.0.0.1:{lp}/v1", f"http://127.0.0.1:{lp}/v1/models", f"Llama {lp}"))
         if os.environ.get("OLLAMA_NO_HOST_FALLBACK") != "1":
+            probes.append(("ollama", "http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/api/tags", "Ollama 11434"))
             probes.append(("openai_local", "http://127.0.0.1:1234/v1", "http://127.0.0.1:1234/v1/models", "LM Studio 1234"))
 
     found: List[Dict[str, Any]] = []
@@ -1826,7 +2348,9 @@ def resolve_model_endpoint(model_id: str, settings: Dict[str, Any]) -> Dict[str,
             cfg_sp = safe_int(local_meta.get("strata_port"), 8080) or 8080
             eff_sp = _ACTIVE_STRATA_PORT if (not local_meta.get("strata_config") or cfg_sp in (8080, _ACTIVE_STRATA_PORT)) else cfg_sp
             ep_url = f"http://127.0.0.1:{eff_sp}/v1"
-        elif local_meta.get("engine") == "ollama" and _ACTIVE_LLAMA_PORT != 11434:
+        elif local_meta.get("engine") == "llama":
+            ep_url = f"http://127.0.0.1:{_ACTIVE_LLAMA_PORT}/v1"
+        elif local_meta.get("engine") == "ollama" and _ACTIVE_LLAMA_PORT not in (11434, 11435):
             ep_url = f"http://127.0.0.1:{_ACTIVE_LLAMA_PORT}/v1"
         else:
             ep_url = local_meta.get("base_url", "http://127.0.0.1:11434/v1").rstrip("/")
@@ -2049,13 +2573,17 @@ def _detect_system_ram_gib() -> int:
                 if line.startswith("MemTotal:"):
                     kb = int(line.split()[1])
                     return round(kb / (1024**2))
+        elif sys.platform == "darwin":
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True, timeout=2.0).strip()
+            if out.isdigit():
+                return round(int(out) / (1024**3))
     except Exception:
         pass
     return 0
 
 
 def get_optimal_ollama_num_ctx(*args, **kwargs) -> int:
-    """根据显卡显存与系统内存动态计算 Ollama / llama-server 27B 模型的安全 num_ctx 窗口（支持 96K/100K 超长跑团上下文）。
+    """根据显卡物理显存动态计算 Ollama / llama-server 模型的安全 num_ctx 窗口，严防中低显存溢写 CPU 内存条导致掉速。
     兼容三种调用签名：
       - get_optimal_ollama_num_ctx()
       - get_optimal_ollama_num_ctx(requested_k, gguf_path="")
@@ -2063,16 +2591,22 @@ def get_optimal_ollama_num_ctx(*args, **kwargs) -> int:
     """
     vram_mib = detect_gpu_vram_mib()
     sys_ram_gib = _detect_system_ram_gib()
-    if vram_mib >= 22000 or sys_ram_gib >= 46:
+    if vram_mib >= 28000:
         hw_cap = 102400
-    elif sys_ram_gib >= 28 or vram_mib >= 15000:
+    elif vram_mib >= 20000:
+        hw_cap = 65536
+    elif vram_mib > 6144:
+        hw_cap = 32768
+    elif vram_mib > 0:
+        hw_cap = 16384
+    elif sys.platform == "darwin" and sys_ram_gib >= 48:
         hw_cap = 98304
-    elif sys_ram_gib >= 20 or vram_mib >= 11000:
+    elif sys.platform == "darwin" and sys_ram_gib >= 32:
         hw_cap = 65536
     else:
         hw_cap = 32768
 
-    requested_tokens = 98304
+    requested_tokens = min(hw_cap, 98304)
     if args:
         first = args[0]
         if isinstance(first, (int, float)) and not isinstance(first, bool) and first > 0:
@@ -2623,16 +3157,49 @@ async def _prepare_portable_strata_config(
     slug = re.sub(r"[^a-zA-Z0-9_\-]", "-", clean_stem).strip("-").lower() or "flash-next"
     _ENGINE_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 匹配或创建 Strata Pack 目录
+    # 匹配或创建 Strata Pack 目录（优先复用内置或本机已构建好的同模型索引包，免去重复构建等待）
     packs_root = strata_root / "data" / "packs"
     packs_root.mkdir(parents=True, exist_ok=True)
     low_name = gguf_shard1.name.lower()
-    if "dongfangshuo" in low_name and "iq3_xxs" in low_name and (packs_root / "dongfangshuo-iq3_xxs" / "index.txt").exists():
-        pack_dir = packs_root / "dongfangshuo-iq3_xxs"
-    elif "swift" in low_name and "iq3_xxs" in low_name and (packs_root / "swift-iq3_xxs" / "index.txt").exists():
-        pack_dir = packs_root / "swift-iq3_xxs"
-    else:
-        pack_dir = packs_root / slug
+    _, _host_sdata = _find_host_strata_dirs()
+    candidate_pack_roots = [packs_root] + [d / "packs" for d in _host_sdata if (d / "packs").exists()]
+    pack_dir = packs_root / slug
+
+    def _is_pack_ready(pdir: Path) -> bool:
+        return (
+            (pdir / "index.txt").exists()
+            and (pdir / "native_experts.txt").exists()
+            and (pdir / "dense.bin").exists()
+            and (pdir / "tokenizer" / "vocab.json").exists()
+        )
+
+    matched_existing_pack: Optional[Path] = None
+    for proot in candidate_pack_roots:
+        cand_names = [slug]
+        if "dongfangshuo" in low_name and "iq3_xxs" in low_name:
+            cand_names.insert(0, "dongfangshuo-iq3_xxs")
+        elif "swift" in low_name and "iq3_xxs" in low_name:
+            cand_names.insert(0, "swift-iq3_xxs")
+        for cname in cand_names:
+            cpk = proot / cname
+            if _is_pack_ready(cpk):
+                matched_existing_pack = cpk
+                break
+        if matched_existing_pack:
+            break
+        try:
+            for sub_pk in proot.iterdir():
+                if sub_pk.is_dir() and _is_pack_ready(sub_pk):
+                    hdr_line = (sub_pk / "native_experts.txt").open("r", encoding="utf-8", errors="ignore").readline().lower()
+                    if low_name in hdr_line:
+                        matched_existing_pack = sub_pk
+                        break
+        except Exception:
+            pass
+        if matched_existing_pack:
+            break
+    if matched_existing_pack is not None:
+        pack_dir = matched_existing_pack
 
     # 若新放入的 Flash-Next 模型尚未生成 Strata 索引包 (index.txt / native_experts.txt / dense.bin / tokenizer)，自动调用 iq_pack.py 构建
     # 注意：无需构建 43GB 的 experts.bin，Strata 引擎支持通过 native_experts.txt 直接原位映射 GGUF 分片并启用 --resident-experts！
@@ -2735,20 +3302,19 @@ async def _prepare_portable_strata_config(
 
     vram_mib = detect_gpu_vram_mib()
     sys_ram_gib = _detect_system_ram_gib()
-    if vram_mib >= 22000:
-        strata_max_ctx = "102400"
+    if vram_mib >= 28000:
+        strata_max_ctx = "98304"
+        strata_kv_type = "fp16"
+        use_kv_resident = False
+        vision_on_gpu = True
+    elif vram_mib >= 22000:
+        strata_max_ctx = "65536"
         strata_kv_type = "fp16"
         use_kv_resident = False
         vision_on_gpu = True
     else:
-        # 8GB / 12GB / 16GB 显卡统一开启 int8 + --kv-resident 32768 流式 KV：显存占用锁死在 32K (~6.88 GiB)，
-        # 超出部分无缝暂存至主机内存，32G/64G 内存机器可零压力畅玩 96K~100K 超长跑团上下文且绝不爆显存！
-        if sys_ram_gib >= 46:
-            strata_max_ctx = "102400"
-        elif sys_ram_gib >= 24 or sys_ram_gib == 0:
-            strata_max_ctx = "98304"
-        else:
-            strata_max_ctx = "65536"
+        # 8GB / 12GB / 16GB 显卡开启 int8 + --kv-resident 32768 流式 KV，将最大窗口控制在 64K 以留出充足内存缓存热门专家
+        strata_max_ctx = "98304" if sys_ram_gib >= 60 else "65536"
         strata_kv_type = "int8"
         use_kv_resident = True
         vision_on_gpu = False
@@ -2863,43 +3429,45 @@ _LOCAL_ENGINE_LOCK = asyncio.Lock()
 
 
 async def shutdown_local_engines() -> None:
-    """服务退出时优雅取消后台模型下载任务，并结束由本服务拉起的 Strata / llama-server 子进程释放显存"""
+    """服务退出时优雅取消后台模型下载任务，并连根结束由本服务拉起的 Strata / Ollama / llama-server 整棵子进程树释放显存"""
     for _, task in list(HF_DOWNLOAD_ASYNC_TASKS.items()):
         if task and not task.done():
             task.cancel()
     HF_DOWNLOAD_ASYNC_TASKS.clear()
-    for proc in list(_SPAWNED_ENGINE_PROCS):
-        try:
-            if proc and proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3.0)
-                except Exception:
-                    proc.kill()
-        except Exception:
-            pass
-    _SPAWNED_ENGINE_PROCS.clear()
+    await asyncio.to_thread(shutdown_local_engines_sync)
 
 
 async def ensure_local_engine_ready(
     model_id: str,
-    status_callback: Optional[Callable[[str], Awaitable[None]]] = None
+    status_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+    parallel_slots: int = 1,
+    slot_ctx_tokens: int = 0,
 ) -> Optional[str]:
-    """智能管理本地双引擎 (Strata 与 Ollama/llama-server)，自动避让占用端口并返回可读故障诊断（成功返回 None）"""
+    """智能管理本地双引擎 (Strata 与原生 llama-server)，自动避让占用端口并返回可读故障诊断（成功返回 None）"""
     async with _LOCAL_ENGINE_LOCK:
-        return await _ensure_local_engine_ready_unlocked(model_id, status_callback)
+        return await _ensure_local_engine_ready_unlocked(
+            model_id,
+            status_callback,
+            parallel_slots=parallel_slots,
+            slot_ctx_tokens=slot_ctx_tokens,
+        )
 
 
 async def _ensure_local_engine_ready_unlocked(
     model_id: str,
-    status_callback: Optional[Callable[[str], Awaitable[None]]] = None
+    status_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+    parallel_slots: int = 1,
+    slot_ctx_tokens: int = 0,
 ) -> Optional[str]:
-    """内部无锁实现：按需静默拉起本地双引擎、端口冲突自动顺延避让、分片完整性校验与中文故障诊断"""
+    """内部无锁实现：按需静默拉起本地双引擎、硬件自适应参数规划、端口冲突顺延与中文故障诊断"""
+    global _ACTIVE_STRATA_PARALLEL, _ACTIVE_LLAMA_PORT, _ACTIVE_LLAMA_PARALLEL, _ACTIVE_LLAMA_MODEL, _ACTIVE_LLAMA_CTX, _ACTIVE_OLLAMA_PARALLEL
+    req_parallel = max(1, min(16, safe_int(parallel_slots, 1)))
+    req_slot_ctx = max(0, safe_int(slot_ctx_tokens, 0))
     local_meta = get_local_model_meta(model_id)
     if not local_meta:
         return None
 
-    engine = local_meta.get("engine", "ollama")
+    engine = local_meta.get("engine", "llama")
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
     si = None
     if os.name == "nt":
@@ -3035,12 +3603,30 @@ async def _ensure_local_engine_ready_unlocked(
             active_ids = await _probe_genuine_strata_server(chk_port)
             if active_ids is not None:
                 if not active_ids or any(aid in target_aliases for aid in active_ids):
-                    _set_active_strata_port(chk_port)
-                    return None
-                # 端口上正在运行另一个真实的 Strata 模型，先释放旧进程以完成热切换
+                    need_relaunch_for_parallel = False
+                    if req_parallel > 1 or _ACTIVE_STRATA_PARALLEL > 1:
+                        try:
+                            async with httpx.AsyncClient(trust_env=False, timeout=1.5) as c_sl:
+                                r_st = await c_sl.get(f"http://127.0.0.1:{chk_port}/v1/status")
+                                if r_st.status_code == 200:
+                                    conc = (r_st.json().get("concurrency") or {})
+                                    cur_req_slots = safe_int(conc.get("requested"), 1) or 1
+                                    if (req_parallel > 1 and cur_req_slots < req_parallel) or (req_parallel == 1 and cur_req_slots > 1):
+                                        need_relaunch_for_parallel = True
+                        except Exception:
+                            pass
+                    if not need_relaunch_for_parallel:
+                        _set_active_strata_port(chk_port)
+                        return None
+                # 端口上正在运行另一个模型或并发槽位模式需切换，先释放旧进程以完成切换
                 if status_callback:
-                    await status_callback(f"切换至 {target_upstream}...")
+                    await status_callback(
+                        f"正在按 {req_parallel} 路并发槽位重新挂载 Strata 引擎 ({target_upstream})..."
+                        if req_parallel > 1
+                        else f"正在恢复单人满血显存模式 ({target_upstream})..."
+                    )
                 await asyncio.to_thread(_kill_strata_on_port, chk_port)
+                _ACTIVE_STRATA_PARALLEL = 1
                 await asyncio.sleep(3.0)
 
         env_strata = os.environ.get("STRATA_DIR", "").strip()
@@ -3127,25 +3713,22 @@ async def _ensure_local_engine_ready_unlocked(
         if status_callback:
             await status_callback(f"启动 Strata 引擎 ({target_upstream})，约 30~90 秒...")
 
-        # 若 Ollama 正在占用显存，通知其卸载已驻留模型 (keep_alive: 0)；若 llama-server 正在占用 11434 端口，结束其进程释放显存
-        ollama_unloaded = False
+        # 若外部 Ollama 或原生 llama-server 正在占用显存，先释放其驻留权重确保 Strata 显存探测精准
         try:
-            async with httpx.AsyncClient(trust_env=False, timeout=5.0) as client:
+            async with httpx.AsyncClient(trust_env=False, timeout=4.0) as client:
                 ps_resp = await client.get("http://127.0.0.1:11434/api/ps")
                 if ps_resp.status_code == 200:
-                    ollama_unloaded = True
                     active_models = ps_resp.json().get("models", [])
                     for active_m in active_models:
                         m_name = active_m.get("name")
                         if m_name:
                             await client.post("http://127.0.0.1:11434/api/generate", json={"model": m_name, "keep_alive": 0})
                     if active_models:
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(1.5)
         except Exception:
             pass
-        if not ollama_unloaded:
-            await asyncio.to_thread(_kill_llama_server)
-            await asyncio.sleep(1.5)
+        await asyncio.to_thread(_kill_llama_server)
+        await asyncio.sleep(1.0)
 
         strata_cfg, cfg_err = await _prepare_portable_strata_config(
             local_meta, strata_root, strata_py, port, creation_flags, status_callback
@@ -3172,6 +3755,10 @@ async def _ensure_local_engine_ready_unlocked(
         try:
             serve_lf = open(serve_log_file, "w", encoding="utf-8", errors="ignore")
             st_env = os.environ.copy()
+            st_env["TRPG_PARENT_PID"] = str(os.getpid())
+            st_env["TRPG_NO_AUTO_RESPAWN"] = "1"
+            if req_parallel > 1:
+                st_env["STRATA_BATCH_MTP"] = "1"
             if os.name != "nt":
                 strata_eng_dir = str(_BUNDLE_ROOT / "engine" / "strata" / "engine")
                 llama_eng_dir = str(_BUNDLE_ROOT / "engine" / "llama")
@@ -3180,16 +3767,21 @@ async def _ensure_local_engine_ready_unlocked(
                     f"{strata_eng_dir}:{llama_eng_dir}:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu"
                     + (f":{old_ld}" if old_ld else "")
                 )
+            strata_cli = [str(strata_py), str(strata_script), "--engine", "strata", "--config", str(strata_cfg), "--port", str(port)]
+            if req_parallel > 1:
+                strata_cli.extend(["--parallel", str(req_parallel)])
+            _ACTIVE_STRATA_PARALLEL = req_parallel
             strata_proc = subprocess.Popen(
-                [str(strata_py), str(strata_script), "--engine", "strata", "--config", str(strata_cfg), "--port", str(port)],
+                strata_cli,
                 cwd=str(strata_root),
                 env=st_env,
                 stdout=serve_lf,
                 stderr=subprocess.STDOUT,
                 creationflags=creation_flags,
-                startupinfo=si
+                startupinfo=si,
+                preexec_fn=_linux_pdeathsig_preexec if os.name != "nt" else None,
             )
-            _SPAWNED_ENGINE_PROCS.append(strata_proc)
+            _register_spawned_engine_proc(strata_proc)
         except Exception as e:
             err_msg = f"启动 Strata 引擎异常：{e}"
             print(err_msg)
@@ -3211,8 +3803,7 @@ async def _ensure_local_engine_ready_unlocked(
                 _print_engine_failure_banner("Strata", strata_proc.returncode, crash_msg, [serve_log_file, engine_log_file])
                 return crash_msg
             if status_callback and wait_sec > 0 and wait_sec % 10 == 0:
-                hdd_hint = "（首次加载或机械硬盘读取较慢，请耐心等待）" if wait_sec >= 90 else ""
-                await status_callback(f"正在加载 Strata 引擎 ({target_upstream})... ({wait_sec}s){hdd_hint}")
+                await status_callback(f"加载 Strata ({target_upstream})... ({wait_sec}s)")
             try:
                 async with httpx.AsyncClient(trust_env=False, timeout=2.0) as client:
                     r = await client.get(models_url)
@@ -3223,6 +3814,146 @@ async def _ensure_local_engine_ready_unlocked(
             except Exception:
                 pass
         return "加载本地 Flash-Next 模型超时（已等待 10 分钟）：若模型放在机械硬盘 (HDD) 上，建议迁移至固态硬盘 (SSD) 后重试。"
+
+    elif engine == "llama" or (engine == "ollama" and local_meta.get("gguf_path") and _find_bundled_llama_server_exe() is not None):
+        gguf_raw = local_meta.get("gguf_path") or ""
+        if not gguf_raw or not Path(gguf_raw).exists():
+            return "未找到该本地模型的 GGUF 文件，请在「模型」中检查路径或重新下载。"
+        gguf_p = Path(gguf_raw)
+        shards_ok, shard_err = _check_gguf_shards_complete(gguf_p)
+        if not shards_ok:
+            return f"本地模型无法启动：{shard_err}。"
+
+        llama_srv_exe = _find_bundled_llama_server_exe()
+        if not llama_srv_exe or not llama_srv_exe.exists():
+            return "未检测到内置原生 llama-server 引擎，请使用完整的 Windows/Linux 纯净整合包。"
+
+        target_llama_id = local_meta.get("upstream_model") or local_meta.get("id") or model_id
+        target_aliases = set([target_llama_id, model_id] + list(local_meta.get("aliases") or []))
+
+        # 1. 若 Strata 正在运行，先释放其显存
+        for chk_sp in list(dict.fromkeys([_ACTIVE_STRATA_PORT, 8080])):
+            if await _probe_genuine_strata_server(chk_sp) is not None:
+                if status_callback:
+                    await status_callback("切换至 Llama...")
+                await asyncio.to_thread(_kill_strata_on_port, chk_sp)
+                await asyncio.sleep(2.0)
+
+        # 2. 若本机外部 11434 Ollama 驻留了权重，礼貌通知其释放显存，避免挤占 --fit 可用显存
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=2.5) as client:
+                ps_resp = await client.get("http://127.0.0.1:11434/api/ps")
+                if ps_resp.status_code == 200:
+                    active_models = ps_resp.json().get("models", [])
+                    for active_m in active_models:
+                        m_name = active_m.get("name")
+                        if m_name:
+                            await client.post("http://127.0.0.1:11434/api/generate", json={"model": m_name, "keep_alive": 0})
+                    if active_models:
+                        await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+        # 3. 检查当前原生 llama-server 是否已挂载同一模型且并发路数、上下文池满足需求（0 秒秒复用）
+        min_needed_pool = (req_slot_ctx * req_parallel) if (req_slot_ctx > 0 and req_parallel > 1) else req_slot_ctx
+        gguf_key = _file_identity_key(gguf_p)
+        if _ACTIVE_LLAMA_MODEL == gguf_key and _ACTIVE_LLAMA_PARALLEL == req_parallel and _ACTIVE_LLAMA_CTX >= min_needed_pool:
+            try:
+                async with httpx.AsyncClient(trust_env=False, timeout=2.0) as client:
+                    r_h, r_m = await asyncio.gather(
+                        client.get(f"http://127.0.0.1:{_ACTIVE_LLAMA_PORT}/health"),
+                        client.get(f"http://127.0.0.1:{_ACTIVE_LLAMA_PORT}/v1/models"),
+                        return_exceptions=True,
+                    )
+                    if (
+                        not isinstance(r_h, Exception)
+                        and not isinstance(r_m, Exception)
+                        and r_h.status_code == 200
+                        and r_m.status_code == 200
+                    ):
+                        active_ids = [m.get("id") for m in r_m.json().get("data", []) if isinstance(m, dict)]
+                        if not active_ids or any(aid in target_aliases for aid in active_ids):
+                            return None
+            except Exception:
+                pass
+
+        # 4. 重新规划硬件自适应参数并拉起原生 llama-server
+        if status_callback:
+            await status_callback(f"准备 Llama ({req_parallel} 路)..." if req_parallel > 1 else "启动 Llama...")
+        await asyncio.to_thread(_kill_llama_server)
+        await asyncio.sleep(1.2)
+
+        ls_port = _pick_available_strata_port(11435)
+        _set_active_llama_port(ls_port)
+        mmproj_path = local_meta.get("mmproj_path") or ""
+        if not mmproj_path and gguf_p.suffix.lower() == ".gguf":
+            best_mm = _find_best_mmproj_for_gguf(gguf_p, False, [])
+            if best_mm and Path(best_mm).exists():
+                mmproj_path = str(best_mm)
+
+        llama_cmd, ls_env, plan_meta = await asyncio.to_thread(
+            _build_adaptive_llama_launch_plan,
+            llama_srv_exe,
+            gguf_p,
+            str(target_llama_id),
+            ls_port,
+            mmproj_path,
+            req_parallel,
+            req_slot_ctx,
+        )
+        _ACTIVE_LLAMA_PARALLEL = req_parallel
+        _ACTIVE_LLAMA_MODEL = gguf_key
+        _ACTIVE_LLAMA_CTX = int(plan_meta["total_ctx"])
+
+        _ENGINE_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = _ENGINE_LOGS_DIR / "llama-server.log"
+        lf = None
+        try:
+            lf = open(log_file, "w", encoding="utf-8", errors="ignore")
+            ls_proc = subprocess.Popen(
+                llama_cmd,
+                cwd=str(llama_srv_exe.parent),
+                env=ls_env,
+                stdout=lf,
+                stderr=subprocess.STDOUT,
+                creationflags=creation_flags,
+                startupinfo=si,
+                preexec_fn=_linux_pdeathsig_preexec if os.name != "nt" else None,
+            )
+            _register_spawned_engine_proc(ls_proc)
+        except Exception as e:
+            _ACTIVE_LLAMA_MODEL = ""
+            err_msg = f"启动原生 Llama 引擎失败：{e}"
+            print(err_msg)
+            return err_msg
+        finally:
+            if lf is not None:
+                try:
+                    lf.close()
+                except Exception:
+                    pass
+
+        disp_label = target_llama_id if len(str(target_llama_id)) <= 36 else gguf_p.name
+        bk_tag = str(plan_meta["backend"]).upper()
+        for wait_sec in range(300):
+            await asyncio.sleep(0.5)
+            if ls_proc.poll() is not None:
+                _ACTIVE_LLAMA_MODEL = ""
+                raw_tail = _read_log_tail([log_file])
+                crash_msg = _translate_engine_crash_reason("llama-server", ls_proc.returncode, raw_tail)
+                _print_engine_failure_banner("llama-server", ls_proc.returncode, crash_msg, [log_file])
+                return crash_msg
+            if status_callback and wait_sec == 2:
+                await status_callback(f"加载 {disp_label} [{bk_tag}]")
+            try:
+                async with httpx.AsyncClient(trust_env=False, timeout=1.5) as client:
+                    r_h = await client.get(f"http://127.0.0.1:{ls_port}/health")
+                    if r_h.status_code == 200:
+                        return None
+            except Exception:
+                pass
+        _ACTIVE_LLAMA_MODEL = ""
+        return "加载本地模型超时（已等待 150 秒），请检查显存/虚拟内存或查看 data/engine_logs/llama-server.log。"
 
     elif engine == "ollama":
         gguf_chk = local_meta.get("gguf_path")
@@ -3240,7 +3971,6 @@ async def _ensure_local_engine_ready_unlocked(
                 await asyncio.to_thread(_kill_strata_on_port, chk_sp)
                 await asyncio.sleep(2.5)
 
-        global _ACTIVE_LLAMA_PORT
         ollama_ready = False
         registered_models: List[str] = []
         try:
@@ -3286,8 +4016,24 @@ async def _ensure_local_engine_ready_unlocked(
                         async with httpx.AsyncClient(trust_env=False, timeout=2.0) as client:
                             rv = await client.get("http://127.0.0.1:11434/api/version")
                             ver_s = str((rv.json() if rv.status_code == 200 else {}).get("version") or "")
-                            # 内置版本为 0.40.15；若当前 11434 版本不同（如宿主机自启的旧版 Ollama，会导致 qwen35 不兼容或跨盘复制到 C 盘），切换为内置引擎
-                            if ver_s != "0.40.15":
+                            # 动态探测整合包内置 ollama.exe 版本（默认 0.40.16）；若当前 11434 运行的是宿主机旧版 Ollama，平滑切换为内置引擎
+                            expected_ver = "0.40.16"
+                            try:
+                                _bv = subprocess.run(
+                                    [str(bundled_ollama_exe), "--version"],
+                                    env={**os.environ, "OLLAMA_HOST": "127.0.0.1:1"},
+                                    capture_output=True,
+                                    text=True,
+                                    creationflags=creation_flags,
+                                    startupinfo=si,
+                                    timeout=2,
+                                )
+                                _m_ver = re.search(r"version is ([0-9]+\.[0-9]+\.[0-9A-Za-z._-]+)", (_bv.stdout or "") + " " + (_bv.stderr or ""))
+                                if _m_ver:
+                                    expected_ver = _m_ver.group(1)
+                            except Exception:
+                                pass
+                            if ver_s != expected_ver:
                                 need_switch_bundled_ollama = True
                     except Exception:
                         pass
@@ -3306,10 +4052,28 @@ async def _ensure_local_engine_ready_unlocked(
                         pass
                     ollama_ready = False
 
+        if ollama_ready and ((req_parallel > _ACTIVE_OLLAMA_PARALLEL) or (_ACTIVE_OLLAMA_PARALLEL > 1 and req_parallel == 1)) and os.name == "nt":
+            if status_callback:
+                await status_callback(f"重启 Ollama ({req_parallel} 路)..." if req_parallel > 1 else "重启 Ollama...")
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "ollama.exe", "/T"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creation_flags,
+                    startupinfo=si,
+                    timeout=5,
+                )
+                await asyncio.sleep(1.0)
+                ollama_ready = False
+                _ACTIVE_OLLAMA_PARALLEL = 1
+            except Exception:
+                pass
+
         if not ollama_ready:
             if status_callback:
-                await status_callback("启动 Ollama...")
-            ollama_ready = await _try_auto_wake_ollama()
+                await status_callback("启动 Ollama..." if req_parallel <= 1 else f"启动 Ollama ({req_parallel} 路并发)...")
+            ollama_ready = await _try_auto_wake_ollama(parallel_slots=req_parallel)
             if ollama_ready:
                 _ACTIVE_LLAMA_PORT = 11434
                 try:
@@ -3423,12 +4187,13 @@ async def _ensure_local_engine_ready_unlocked(
                             r_ls = await client.get(f"http://127.0.0.1:{chk_lp}/v1/models")
                             if r_ls.status_code == 200:
                                 active_ids = [m.get("id") for m in r_ls.json().get("data", []) if isinstance(m, dict)]
-                                if not active_ids or any(aid in target_aliases for aid in active_ids):
+                                if (not active_ids or any(aid in target_aliases for aid in active_ids)) and req_parallel == _ACTIVE_LLAMA_PARALLEL:
                                     _ACTIVE_LLAMA_PORT = chk_lp
                                     return None
                     except Exception:
                         pass
                 await asyncio.to_thread(_kill_llama_server)
+                _ACTIVE_LLAMA_PARALLEL = req_parallel
                 await asyncio.sleep(1.5)
                 ls_port = 11434 if _is_port_cleanly_available(11434) else _pick_available_strata_port(11435)
                 _ACTIVE_LLAMA_PORT = ls_port
@@ -3450,8 +4215,8 @@ async def _ensure_local_engine_ready_unlocked(
                     "-a", str(target_ollama_id),
                     "--host", "127.0.0.1",
                     "--port", str(ls_port),
-                    "-c", str(get_optimal_ollama_num_ctx(96, gguf_path)),
-                    "-np", "1",
+                    "-c", str(max(get_optimal_ollama_num_ctx(96, gguf_path), 40960 * req_parallel if req_parallel > 1 else 0)),
+                    "-np", str(req_parallel),
                     "-fa", "on",
                     "-ctk", "q8_0",
                     "-ctv", "q8_0",
@@ -3495,8 +4260,9 @@ async def _ensure_local_engine_ready_unlocked(
                         stderr=subprocess.STDOUT,
                         creationflags=creation_flags,
                         startupinfo=si,
+                        preexec_fn=_linux_pdeathsig_preexec if os.name != "nt" else None,
                     )
-                    _SPAWNED_ENGINE_PROCS.append(ls_proc)
+                    _register_spawned_engine_proc(ls_proc)
                 except Exception as e:
                     err_msg = f"启动 27B 引擎 (llama-server) 失败：{e}"
                     print(err_msg)
@@ -3678,6 +4444,34 @@ DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT = (
 )
 
 DEFAULT_STATUS_PANEL_PROMPT = DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT
+
+DEFAULT_FAST_TRPG_SYSTEM_PROMPT = (
+    "【世界观与背景设定】\n"
+    "（在此填写你的世界观、主角身份与开场处境；若不填，则根据你的首句输入或角色卡自动推演。）\n\n"
+    "【跑团导演规则】\n"
+    "你是兼具电影镜头感与游戏策划功底的跑团主持（DM），严格遵循以下规则：\n"
+    "1. 沉浸叙事：全程使用第二人称（「你」），细致刻画光影、声响、动作与微表情；严禁代替玩家做决定或抢说玩家台词。\n"
+    "2. 主动推进与真实博弈：\n"
+    "   - 每回合必须实质推进至少一个完整事件节点，严禁原地踏步或照抄复述玩家原话；\n"
+    "   - 世界与敌对势力拥有独立动机与果断执行力，绝不无脑顺从玩家——一旦你暴露、失误或陷入劣势，敌方会直接实施压制、控制、搜身或局势升级，绝不只放狠话不动手。\n"
+    "3. 关键检定：\n"
+    "   - 普通交谈与日常行动不挂检定；仅在生死搏杀、高危潜行、撬锁拆弹、识破谎言等关键分水岭，才在对应选项末尾标注 `【🎲XX检定】`（如 `【🎲潜行检定】`）；\n"
+    "   - 收到投骰点数后，结合难度在下一轮开头演绎成败；检定失败不卡死剧情，以“付出代价或触发新危机”继续推进。\n"
+    "4. 输出格式（正文 + 折叠记忆区 + 底部选项，严禁输出 `<status>` 状态栏）：\n"
+    "   - 第一部分：直接输出 800~1500 字剧情正文（不写任何标题）；\n"
+    "   - 第二部分：正文结束后，用 `<memory>` 标签输出精炼记忆备忘（总计控制在 200 字以内，只记关键锚点不写流水账）：\n"
+    "     <memory>\n"
+    "     [长期记忆]：跨回合累积保留不可逆的重大事件、关键人物关系与秘密、核心契约及重要随身物（保留旧锚点，简短追加新进展）\n"
+    "     [短期记忆]：当前时间地点、眼下处境与身体/衣着状态、在场人物动向及眼前的即时危机（每轮滚动更新）\n"
+    "     </memory>\n"
+    "   - 第三部分：在 `</memory>` 之后的最底部输出唯一一次：\n"
+    "     你打算怎么做？\n"
+    "     1. ……\n"
+    "     2. ……\n"
+    "     3. ……\n"
+    "     4. ……\n"
+    "     （提供 4 个真正改变局势走向的不同行动分支，写完第 4 项立即停止。）"
+)
 
 
 def upgrade_legacy_global_protocol_prompt(raw_prompt: Optional[str], allow_empty: bool = True) -> str:
@@ -4004,6 +4798,19 @@ def is_free_chat_project(project_data: Dict[str, Any]) -> bool:
     return False
 
 
+def is_simple_trpg_project(project_data: Dict[str, Any]) -> bool:
+    """判断项目是否为『极速跑团 / 单框简单跑团』模式（无状态栏、不注入底层全局状态栏协议）"""
+    if not isinstance(project_data, dict):
+        return False
+    if bool(project_data.get("simple_mode", False)):
+        return True
+    if str(project_data.get("id") or "").strip() == "proj_fast_trpg":
+        return True
+    if str(project_data.get("category") or "").strip() in ("极速跑团", "简单跑团"):
+        return True
+    return False
+
+
 EROTIC_SCALE_TIERS: Dict[int, Tuple[str, str]] = {
     0: ("纯爱", "全年龄纯爱向，严禁任何性暗示或擦边描写，情感表达止步于纯洁牵手与眼神交流。"),
     1: ("悸动", "青涩暧昧与心动拉扯，可包含耳语、拥抱、脸红心跳等轻度肢体接触，点到为止。"),
@@ -4046,21 +4853,13 @@ def build_content_scale_prompt_block(project_data: Dict[str, Any]) -> str:
 
 
 def build_status_module_prompt(project_data: Dict[str, Any], global_protocol_prompt: Optional[str] = None) -> str:
-    """拼接全局跑团编写协议、当前剧本附加协议、内容尺度与功能栏提示词（防止剧本短规则或空串意外顶掉全局核心协议）"""
-    if not isinstance(project_data, dict):
+    """仅拼接当前剧本自身携带的协议、内容尺度与已启用功能栏规范（极速跑团与自由聊天保持 100% 纯净 0 状态栏）"""
+    if not isinstance(project_data, dict) or is_simple_trpg_project(project_data) or is_free_chat_project(project_data):
         return ""
     proj_proto_raw = project_data.get("system_protocol_prompt")
-    proj_clean = upgrade_legacy_global_protocol_prompt("" if proj_proto_raw is None else str(proj_proto_raw), allow_empty=True).strip()
-    global_clean = upgrade_legacy_global_protocol_prompt("" if global_protocol_prompt is None else str(global_protocol_prompt), allow_empty=True).strip()
-
-    if is_free_chat_project(project_data):
-        protocol_header = proj_clean
-    elif not proj_clean:
-        protocol_header = global_clean
-    elif global_clean and "【系统提示词 · 功能栏与跑团编写协议" not in proj_clean and "<status>" not in proj_clean.lower() and proj_clean not in global_clean:
-        protocol_header = f"{global_clean}\n\n【当前剧本附加执行准则】：\n{proj_clean}"
-    else:
-        protocol_header = proj_clean
+    protocol_header = upgrade_legacy_global_protocol_prompt(
+        "" if proj_proto_raw is None else str(proj_proto_raw), allow_empty=True
+    ).strip()
     scale_block = build_content_scale_prompt_block(project_data).strip()
     modules_spec = build_ui_modules_spec_block(project_data).strip()
 
@@ -4080,7 +4879,8 @@ def build_status_module_prompt(project_data: Dict[str, Any], global_protocol_pro
             m for m in enabled_mods
             if str(m.get("type") or "progress_stats") in STATUS_SUBMODULE_TYPES
         ]
-        if status_mods and "<status>" not in protocol_header.lower():
+        sys_prompt_low = str(project_data.get("system_prompt") or "").lower()
+        if status_mods and "<status>" not in protocol_header.lower() and "<status>" not in sys_prompt_low:
             mod_tags = "、".join([f"[{str(m.get('key') or '').strip()}]" for m in status_mods])
             auto_status_proto = (
                 f"【状态栏输出协议】：\n"
@@ -4445,6 +5245,83 @@ def normalize_project_schema(
         if "description" in payload
         else str(existing.get("description") or "")
     )
+    detailed_desc_val = (
+        ("" if payload["detailed_description"] is None else str(payload["detailed_description"]))
+        if "detailed_description" in payload
+        else str(existing.get("detailed_description") or "")
+    )
+    if "custom_css" in payload:
+        custom_css_val = "" if payload["custom_css"] is None else str(payload["custom_css"])
+    elif isinstance(payload.get("appearance"), dict) and "custom_css" in payload["appearance"]:
+        custom_css_val = "" if payload["appearance"]["custom_css"] is None else str(payload["appearance"]["custom_css"])
+    else:
+        _ex_css = existing.get("custom_css")
+        if _ex_css is None and isinstance(existing.get("appearance"), dict):
+            _ex_css = existing["appearance"].get("custom_css")
+        custom_css_val = str(_ex_css or "")
+    app_cfg["custom_css"] = custom_css_val
+
+    raw_qr = (
+        payload.get("quick_replies")
+        if isinstance(payload.get("quick_replies"), list)
+        else (existing.get("quick_replies") if isinstance(existing.get("quick_replies"), list) else [])
+    )
+    norm_qr: List[Dict[str, Any]] = []
+    for q_idx, qr in enumerate(raw_qr[:10]):
+        if not isinstance(qr, dict):
+            continue
+        q_label = str(qr.get("label") or qr.get("name") or "").strip()
+        q_cmd = str(qr.get("command") or qr.get("cmd") or "").strip()
+        q_content = str(qr.get("content") or qr.get("text") or "").strip()
+        if q_label or q_cmd or q_content:
+            norm_qr.append({
+                "id": str(qr.get("id") or f"qr_{q_idx + 1}"),
+                "label": q_label or q_cmd or f"快捷 #{q_idx + 1}",
+                "command": q_cmd,
+                "content": q_content,
+                "auto_send": qr.get("auto_send", True) is not False,
+            })
+
+    wb_defaults = {
+        "key_region": 6,
+        "match_type": "OR",
+        "value_region": "System",
+        **(existing.get("worldbook_defaults") if isinstance(existing.get("worldbook_defaults"), dict) else {}),
+        **(payload.get("worldbook_defaults") if isinstance(payload.get("worldbook_defaults"), dict) else {}),
+    }
+    cg_defaults = {
+        "trigger_source": "ai",
+        "match_type": "OR",
+        "display_mode": "chat",
+        **(existing.get("cg_defaults") if isinstance(existing.get("cg_defaults"), dict) else {}),
+        **(payload.get("cg_defaults") if isinstance(payload.get("cg_defaults"), dict) else {}),
+    }
+
+    raw_card_tier = str(payload.get("card_tier") or existing.get("card_tier") or "").strip().lower()
+    is_fast_builtin = str(project_id) == "proj_fast_trpg"
+    if raw_card_tier == "advanced" and not is_fast_builtin:
+        resolved_simple_mode = False
+        resolved_card_tier = "advanced"
+    else:
+        resolved_simple_mode = bool(
+            payload.get(
+                "simple_mode",
+                existing.get(
+                    "simple_mode",
+                    is_fast_builtin
+                    or str(payload.get("category", existing.get("category", ""))).strip() in ("极速跑团", "简单跑团"),
+                ),
+            )
+        )
+        if raw_card_tier in ("simple", "advanced"):
+            resolved_card_tier = raw_card_tier
+        else:
+            resolved_card_tier = "simple" if resolved_simple_mode else "advanced"
+
+    resolved_category = str(payload.get("category", existing.get("category", "")) or "")
+    if resolved_card_tier == "advanced" and not is_fast_builtin and resolved_category.strip() in ("极速跑团", "简单跑团"):
+        resolved_category = ""
+
     open_stmt_val = (
         ("" if payload["opening_statement"] is None else str(payload["opening_statement"]))
         if "opening_statement" in payload
@@ -4474,8 +5351,14 @@ def normalize_project_schema(
         "avatar": avatar_val,
         "icon": avatar_val,
         "description": desc_val,
-        "author": payload.get("author", existing.get("author", "Admin Studio")),
-        "category": payload.get("category", existing.get("category", "")),
+        "detailed_description": detailed_desc_val,
+        "custom_css": custom_css_val,
+        "quick_replies": norm_qr,
+        "worldbook_defaults": wb_defaults,
+        "cg_defaults": cg_defaults,
+        "author": payload.get("author", existing.get("author", "Easy-TRPG")),
+        "category": resolved_category,
+        "card_tier": resolved_card_tier,
         "tags": list(payload["tags"]) if isinstance(payload.get("tags"), list) else (list(existing["tags"]) if isinstance(existing.get("tags"), list) else []),
         "system_prompt": sys_prompt,
         "system_protocol_prompt": sys_proto,
@@ -4485,9 +5368,42 @@ def normalize_project_schema(
         "opening_statement": open_stmt_val,
         "suggested_questions": list(payload.get("suggested_questions", existing.get("suggested_questions", [])) or []),
         "prompt_variables": norm_pvars,
-        "status_panel_enabled": bool(payload.get("status_panel_enabled", existing.get("status_panel_enabled", True))),
-        "status_panel_template": payload.get("status_panel_template", existing.get("status_panel_template", "")),
-        "ui_modules": normalize_ui_modules(
+        "simple_mode": resolved_simple_mode,
+        "cot_enabled": bool(
+            payload["cot_enabled"]
+            if ("cot_enabled" in payload and payload["cot_enabled"] is not None)
+            else (
+                existing["cot_enabled"]
+                if ("cot_enabled" in existing and existing["cot_enabled"] is not None)
+                else not (
+                    str(project_id) == "proj_fast_trpg"
+                    or str(payload.get("category", existing.get("category", ""))).strip() in ("极速跑团", "简单跑团")
+                )
+            )
+        ),
+        "status_panel_enabled": False
+        if resolved_simple_mode
+        else bool(
+            payload["status_panel_enabled"]
+            if ("status_panel_enabled" in payload and payload["status_panel_enabled"] is not None)
+            else (
+                existing["status_panel_enabled"]
+                if ("status_panel_enabled" in existing and existing["status_panel_enabled"] is not None)
+                else bool(
+                    normalize_ui_modules(
+                        payload.get("ui_modules")
+                        if isinstance(payload.get("ui_modules"), list)
+                        else existing.get("ui_modules")
+                    )
+                )
+            )
+        ),
+        "status_panel_template": ""
+        if resolved_simple_mode
+        else payload.get("status_panel_template", existing.get("status_panel_template", "")),
+        "ui_modules": []
+        if resolved_simple_mode
+        else normalize_ui_modules(
             payload.get("ui_modules")
             if isinstance(payload.get("ui_modules"), list)
             else existing.get("ui_modules")
@@ -4497,6 +5413,11 @@ def normalize_project_schema(
         "regex_replaces": list(regex_list),
         "regex_scripts": list(regex_list),
         "cg_book": payload.get("cg_book", existing.get("cg_book", [])),
+        "guided_meta": (
+            dict(payload["guided_meta"])
+            if isinstance(payload.get("guided_meta"), dict)
+            else (dict(existing["guided_meta"]) if isinstance(existing.get("guided_meta"), dict) else {})
+        ),
         "memory_palace": payload.get("memory_palace", existing.get("memory_palace", [])),
         "memory_type": payload.get("memory_type", existing.get("memory_type", "auto_summary")),
         "max_context_turns": max_turns,
@@ -5099,18 +6020,23 @@ def evaluate_world_book(
 
     return final_sys, final_pre, final_suf, triggered_logs
 
-def evaluate_cg_book(project_data: Dict[str, Any], text_to_scan: str) -> Tuple[List[Dict[str, Any]], bool]:
-    """扫描最新消息中的关键词，触发并解锁对应的 CG 图鉴"""
+def evaluate_cg_book(
+    project_data: Dict[str, Any],
+    text_to_scan: str,
+    ai_only_text: str = "",
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """扫描最新消息中的关键词，触发并解锁对应的 CG 图鉴（支持 AND/OR 逻辑、仅扫描 AI 区域、聊天/背景区域映射）"""
     cg_list = project_data.get("cg_book") or []
-    if not isinstance(cg_list, list) or not cg_list or not text_to_scan:
+    if not isinstance(cg_list, list) or not cg_list or not (text_to_scan or ai_only_text):
         return [], False
 
     triggered_cgs: List[Dict[str, Any]] = []
     updated_flag = False
-    lower_text = text_to_scan.lower()
+    lower_both = (text_to_scan or "").lower()
+    lower_ai = (ai_only_text or text_to_scan or "").lower()
 
     for cg in cg_list:
-        if not isinstance(cg, dict):
+        if not isinstance(cg, dict) or cg.get("enabled", True) is False:
             continue
         raw_keys = cg.get("keys") if cg.get("keys") is not None else cg.get("keywords", [])
         if isinstance(raw_keys, str):
@@ -5123,7 +6049,15 @@ def evaluate_cg_book(project_data: Dict[str, Any], text_to_scan: str) -> Tuple[L
         if not keys:
             continue
 
-        if any(k.lower() in lower_text for k in keys):
+        trig_src = str(cg.get("trigger_source") or "both").strip().lower()
+        haystack = lower_ai if trig_src == "ai" else lower_both
+        match_mode = str(cg.get("match_type") or "OR").strip().upper()
+        matched = (
+            all(k.lower() in haystack for k in keys)
+            if match_mode in ("AND", "ALL", "与")
+            else any(k.lower() in haystack for k in keys)
+        )
+        if matched:
             img_url = cg.get("image_url") or cg.get("url") or ""
             if safe_int(cg.get("value_type", 0), 0) == 1:
                 cfgs = [
@@ -5147,7 +6081,8 @@ def evaluate_cg_book(project_data: Dict[str, Any], text_to_scan: str) -> Tuple[L
                     "name": cg_name,
                     "title": cg_name,
                     "image_url": img_url,
-                    "unlock_hint": cg_hint
+                    "unlock_hint": cg_hint,
+                    "display_mode": str(cg.get("display_mode") or "chat").strip().lower(),
                 })
 
     return triggered_cgs, updated_flag
@@ -5420,7 +6355,10 @@ def create_enterprise_router(
             "stream": True
         }
         if ep["is_local"]:
-            if ep["engine"] == "ollama":
+            if ep["engine"] == "llama":
+                test_body["reasoning_budget"] = 0
+                test_body["chat_template_kwargs"] = {"enable_thinking": False}
+            elif ep["engine"] == "ollama":
                 test_body["think"] = False
                 test_body["options"] = {"num_ctx": get_optimal_ollama_num_ctx()}
             elif ep["engine"] == "strata":
@@ -5698,8 +6636,8 @@ def create_enterprise_router(
 
         if not isinstance(src_proj, dict):
             src_proj = {
-                "name": payload.get("new_name") or "新剧本",
-                "icon": "🎲",
+                "name": payload.get("new_name") or "新企划",
+                "icon": "",
                 "description": "",
                 "tags": [],
                 "opening_greetings": [],
@@ -5709,7 +6647,7 @@ def create_enterprise_router(
                 "suffix": "",
                 "system_protocol_prompt": "",
                 "ui_modules": [],
-                "status_panel_enabled": True,
+                "status_panel_enabled": False,
             }
 
         cloned = json.loads(json.dumps(src_proj))
@@ -5833,6 +6771,13 @@ def create_enterprise_router(
                 req_json["reasoning_budget_tokens"] = 256
                 req_json["repetition_penalty"] = 1.08
                 req_json["penalty_last_n"] = 2048
+                req_json["presence_penalty"] = 0.45
+                req_json["frequency_penalty"] = 0.12
+            elif ep["engine"] == "llama":
+                req_json["reasoning_budget"] = 0
+                req_json["chat_template_kwargs"] = {"enable_thinking": False}
+                req_json["repeat_penalty"] = 1.08
+                req_json["repeat_last_n"] = 2048
                 req_json["presence_penalty"] = 0.45
                 req_json["frequency_penalty"] = 0.12
             elif ep["engine"] == "ollama":

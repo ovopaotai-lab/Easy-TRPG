@@ -34,3 +34,11 @@ Thumbs.db
 .vscode/
 .idea/
 .active_server_port
+
+# Clean Master Dev Pipeline Tools (excluded from end-user release packages)
+_dev_tools/
+DEVELOPMENT_WORKFLOW.md
+同步升级到我的工作台.bat
+重置纯净母本出厂数据.bat
+一键打包纯净发布版.bat
+AGENTS.md

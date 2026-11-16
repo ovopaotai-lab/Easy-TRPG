@@ -50,6 +50,19 @@ function normalizeProjectClient(proj) {
   proj.avatar = proj.icon;
   proj.name = proj.name || "未命名剧本";
   proj.description = proj.description || "";
+  proj.detailed_description = proj.detailed_description || "";
+  if (proj.card_tier !== "simple" && proj.card_tier !== "advanced") {
+    const catTrim = String(proj.category || "").trim();
+    proj.card_tier = (proj.simple_mode === true || catTrim === "极速跑团" || catTrim === "简单跑团")
+      ? "simple"
+      : "advanced";
+  }
+  if (proj.card_tier === "advanced" && proj.id !== "proj_fast_trpg") {
+    proj.simple_mode = false;
+    if (["极速跑团", "简单跑团"].includes(String(proj.category || "").trim())) {
+      proj.category = "";
+    }
+  }
   proj.tags = Array.isArray(proj.tags) ? proj.tags : [];
   proj.prefix = proj.prefix || "";
   proj.system_prompt = proj.system_prompt || "";
@@ -82,10 +95,36 @@ function normalizeProjectClient(proj) {
     proj.completion_params.context_mode = "turns";
   }
 
+  proj.guided_meta = (proj.guided_meta && typeof proj.guided_meta === "object") ? proj.guided_meta : {};
+  proj.world_book = Array.isArray(proj.world_book) ? proj.world_book : [];
+  proj.regex_replaces = Array.isArray(proj.regex_replaces)
+    ? proj.regex_replaces
+    : (Array.isArray(proj.regex_scripts) ? proj.regex_scripts : []);
+  proj.regex_scripts = proj.regex_replaces;
+  proj.cg_book = Array.isArray(proj.cg_book) ? proj.cg_book : [];
+  proj.quick_replies = Array.isArray(proj.quick_replies) ? proj.quick_replies.slice(0, 10) : [];
+  proj.worldbook_defaults = Object.assign({
+    key_region: 6,
+    match_type: "OR",
+    value_region: "System"
+  }, (proj.worldbook_defaults && typeof proj.worldbook_defaults === "object") ? proj.worldbook_defaults : {});
+  proj.cg_defaults = Object.assign({
+    trigger_source: "ai",
+    match_type: "OR",
+    display_mode: "chat"
+  }, (proj.cg_defaults && typeof proj.cg_defaults === "object") ? proj.cg_defaults : {});
+
+  const resolvedCss = (proj.custom_css !== undefined && proj.custom_css !== null)
+    ? String(proj.custom_css)
+    : String(proj.appearance?.custom_css || "");
+  proj.custom_css = resolvedCss;
   proj.appearance = Object.assign({
     bg_image: proj.bg_image || "",
+    bg_mobile: proj.appearance?.bg_mobile || "",
+    custom_css: resolvedCss,
     theme_mode: proj.appearance?.theme || "dark"
   }, proj.appearance || {});
+  proj.appearance.custom_css = resolvedCss;
   proj.appearance.theme = proj.appearance.theme_mode;
   proj.bg_image = proj.appearance.bg_image;
 
@@ -213,7 +252,7 @@ function renderStudioWorkbench() {
   pane.dataset.renderedProjId = String(proj.id || "");
 
   const isWide = pane.classList.contains("wide-mode");
-  const isDefaultProj = proj.id === "proj_default";
+  const isDefaultProj = ["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(proj.id);
 
   pane.innerHTML = `
     <div class="studio-header">
@@ -223,9 +262,23 @@ function renderStudioWorkbench() {
           <div class="studio-header-title-group">
             <span class="studio-header-main-title">剧本设定</span>
             <span class="studio-header-proj-pill" id="studioAppBadgeTitle" title="重命名" onclick="window.startInlineProjectRename && window.startInlineProjectRename('${escapeJsAttr(proj.id)}', this, '${escapeJsAttr(proj.name || "未命名剧本")}', '')">${escapeHtml(proj.name || "未命名剧本")}</span>
+            ${!isDefaultProj
+              ? (getProjectCardTier(proj) === "simple"
+                  ? `<span class="proj-tier-tag tier-simple">简易卡</span>`
+                  : `<span class="proj-tier-tag tier-advanced">高级卡</span>`)
+              : ""
+            }
           </div>
         </div>
         <div class="studio-header-actions">
+          ${!isDefaultProj
+            ? (getProjectCardTier(proj) === "simple"
+                ? `<button class="btn btn-xs btn-outline-secondary studio-top-btn" type="button" onclick="window.openGuidedGameCardModal && window.openGuidedGameCardModal('${escapeJsAttr(proj.id)}')" title="打开三步简易创作向导">简易向导</button>
+                   <button class="btn btn-xs btn-primary studio-top-btn" type="button" onclick="window.upgradeProjectToAdvanced('${escapeJsAttr(proj.id)}', false)" title="将此简易卡升级为高级游戏卡（解锁世界书、内置CSS、正则与前后置词）">⬆ 升级高级</button>`
+                : `<button class="btn btn-xs btn-outline-secondary studio-top-btn" type="button" onclick="window.openAdvancedCreatorForProject && window.openAdvancedCreatorForProject('${escapeJsAttr(proj.id)}')" title="打开全屏三栏高级创作工坊">高级工坊</button>`)
+            : ""
+          }
+          <button class="btn btn-xs btn-outline-secondary studio-top-btn" type="button" onclick="window.exportProjectGameCard && window.exportProjectGameCard('${escapeJsAttr(proj.id)}', 'png')" title="导出为可分享且兼容酒馆的 PNG 游戏卡">导出卡</button>
           <button id="btnExpandStudioWidth" class="btn btn-xs btn-outline-secondary studio-top-btn" type="button" onclick="window.toggleStudioWideMode()" title="宽度">${isWide ? "标准" : "宽屏"}</button>
           <button class="btn btn-xs btn-primary studio-top-btn studio-top-save-btn" type="button" onclick="window.saveStudioProjectConfig(true)">保存</button>
           <button class="btn btn-xs btn-outline-secondary studio-top-btn studio-top-close-btn" type="button" onclick="window.toggleStudioWorkbench(false)" title="收起">关闭</button>
@@ -233,12 +286,16 @@ function renderStudioWorkbench() {
       </div>
     </div>
     <div class="studio-body" id="studioTabBody"></div>
-    ${!isDefaultProj
-      ? `<div class="studio-footer">
-          <button class="btn btn-xs btn-outline-danger studio-delete-btn" type="button" onclick="window.handleDeleteProject && window.handleDeleteProject()">删除此剧本</button>
-        </div>`
-      : ""
-    }
+    <div class="studio-footer" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        <button class="btn btn-xs btn-outline-secondary" type="button" onclick="window.exportProjectGameCard && window.exportProjectGameCard('${escapeJsAttr(proj.id)}', 'png')">导出 PNG 游戏卡</button>
+        <button class="btn btn-xs btn-outline-secondary" type="button" onclick="window.exportProjectGameCard && window.exportProjectGameCard('${escapeJsAttr(proj.id)}', 'json')">导出 JSON</button>
+      </div>
+      ${!isDefaultProj
+        ? `<button class="btn btn-xs btn-outline-danger studio-delete-btn" type="button" onclick="window.handleDeleteProject && window.handleDeleteProject()">删除此游戏卡</button>`
+        : ""
+      }
+    </div>
   `;
 
   const bodyEl = document.getElementById("studioTabBody");
@@ -298,6 +355,120 @@ const DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT = [
   "   - **拒绝顺从复读**：严禁照抄复述玩家输入的句子，严禁跨回合套用雷同的段落反应模板；底部的 `1.` ~ `4.` 行动选项必须代表真正改变局势走向的差异化分支。"
 ].join("\n");
 window.DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT = DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT;
+
+const DEFAULT_FAST_TRPG_SYSTEM_PROMPT = [
+  "【世界观与背景设定】",
+  "（在此填写你的世界观、主角身份与开场处境；若不填，则根据你的首句输入或角色卡自动推演。）",
+  "",
+  "【跑团导演规则】",
+  "你是兼具电影镜头感与游戏策划功底的跑团主持（DM），严格遵循以下规则：",
+  "1. 沉浸叙事：全程使用第二人称（「你」），细致刻画光影、声响、动作与微表情；严禁代替玩家做决定或抢说玩家台词。",
+  "2. 主动推进与真实博弈：",
+  "   - 每回合必须实质推进至少一个完整事件节点，严禁原地踏步或照抄复述玩家原话；",
+  "   - 世界与敌对势力拥有独立动机与果断执行力，绝不无脑顺从玩家——一旦你暴露、失误或陷入劣势，敌方会直接实施压制、控制、搜身或局势升级，绝不只放狠话不动手。",
+  "3. 关键检定：",
+  "   - 普通交谈与日常行动不挂检定；仅在生死搏杀、高危潜行、撬锁拆弹、识破谎言等关键分水岭，才在对应选项末尾标注 `【🎲XX检定】`（如 `【🎲潜行检定】`）；",
+  "   - 收到投骰点数后，结合难度在下一轮开头演绎成败；检定失败不卡死剧情，以“付出代价或触发新危机”继续推进。",
+  "4. 输出格式（正文 + 折叠记忆区 + 底部选项，严禁输出 `<status>` 状态栏）：",
+  "   - 第一部分：直接输出 800~1500 字剧情正文（不写任何标题）；",
+  "   - 第二部分：正文结束后，用 `<memory>` 标签输出精炼记忆备忘（总计控制在 200 字以内，只记关键锚点不写流水账）：",
+  "     <memory>",
+  "     [长期记忆]：跨回合累积保留不可逆的重大事件、关键人物关系与秘密、核心契约及重要随身物（保留旧锚点，简短追加新进展）",
+  "     [短期记忆]：当前时间地点、眼下处境与身体/衣着状态、在场人物动向及眼前的即时危机（每轮滚动更新）",
+  "     </memory>",
+  "   - 第三部分：在 `</memory>` 之后的最底部输出唯一一次：",
+  "     你打算怎么做？",
+  "     1. ……",
+  "     2. ……",
+  "     3. ……",
+  "     4. ……",
+  "     （提供 4 个真正改变局势走向的不同行动分支，写完第 4 项立即停止。）"
+].join("\n");
+window.DEFAULT_FAST_TRPG_SYSTEM_PROMPT = DEFAULT_FAST_TRPG_SYSTEM_PROMPT;
+
+function isBuiltinSystemProject(proj) {
+  const pid = String(proj?.id || "").trim();
+  return ["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(pid);
+}
+window.isBuiltinSystemProject = isBuiltinSystemProject;
+
+function getProjectCardTier(proj) {
+  if (!proj || typeof proj !== "object") return "advanced";
+  if (isBuiltinSystemProject(proj)) return "builtin";
+  if (proj.card_tier === "advanced") return "advanced";
+  if (proj.card_tier === "simple" || proj.simple_mode === true) return "simple";
+  const cat = String(proj.category || "").trim();
+  if (cat === "极速跑团" || cat === "简单跑团") return "simple";
+  return "advanced";
+}
+window.getProjectCardTier = getProjectCardTier;
+
+function isSimpleTrpgProject(proj) {
+  if (!proj || typeof proj !== "object") return false;
+  if (String(proj.id || "").trim() === "proj_fast_trpg") return true;
+  if (proj.card_tier === "advanced") return false;
+  if (proj.simple_mode === true) return true;
+  const cat = String(proj.category || "").trim();
+  return cat === "极速跑团" || cat === "简单跑团";
+}
+window.isSimpleTrpgProject = isSimpleTrpgProject;
+
+window.upgradeProjectToAdvanced = async function (projId, openWorkshopModal = false) {
+  const targetId = projId || currentProjectId;
+  if (!targetId || ["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(targetId)) return;
+
+  // 若当前正在右侧剧本设定中编辑该卡，先同步未落盘的输入内容
+  if (targetId === currentProjectId && document.getElementById("studioWorkbenchPane")?.style.display !== "none") {
+    collectCurrentTabFormState();
+  }
+  const pMap = typeof projectsMap !== "undefined" ? projectsMap : window.projectsMap;
+  const srcProj = (pMap && pMap[targetId]) || exploreUserProjectsCache.find((x) => x.id === targetId);
+  if (!srcProj) return;
+
+  if (!window.confirm(`确定将简易游戏卡「${srcProj.name || "未命名"}」升级为高级游戏卡吗？\n\n升级后将 100% 保留现有提示词、封面、背景与开场设定，并解锁：\n• 主提示词 / 前置词 / 后置词独立编排\n• 世界书按需触发词条\n• 内置 CSS 皮肤与自定义 UI\n• 正则脚本、快捷回复指令与独立采样参数\n\n（注：升级为高级卡后为单向升级，不可退回简易卡）`)) {
+    return;
+  }
+
+  const upgradedPayload = JSON.parse(JSON.stringify(normalizeProjectClient(srcProj)));
+  upgradedPayload.id = targetId;
+  upgradedPayload.card_tier = "advanced";
+  upgradedPayload.simple_mode = false;
+  if (["极速跑团", "简单跑团"].includes(String(upgradedPayload.category || "").trim())) {
+    upgradedPayload.category = "";
+  }
+
+  try {
+    const res = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(upgradedPayload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+    await loadProjects();
+    if (exploreUserProjectsCache.length > 0) {
+      exploreUserProjectsCache = exploreUserProjectsCache.map((p) => (p.id === targetId ? data.project : p));
+    }
+    if (targetId === currentProjectId) {
+      applyProjectAppearance(getActiveProjectObj());
+      if (typeof window.syncCotToggleUI === "function") window.syncCotToggleUI();
+    }
+    const pane = document.getElementById("studioWorkbenchPane");
+    if (pane && pane.style.display !== "none" && targetId === currentProjectId) {
+      renderStudioWorkbench();
+    }
+    showToast(`已将「${data.project.name}」升级为高级游戏卡！`);
+
+    if (openWorkshopModal) {
+      await window.openAdvancedCreatorForProject(targetId);
+    } else if (document.getElementById("exploreModal")?.style.display !== "none" && !advancedDraftProject) {
+      renderExploreModalContent();
+    }
+  } catch (err) {
+    showToast("升级高级游戏卡失败: " + err.message);
+  }
+};
 
 const _DM_PROACTIVE_RULE_6_JS = [
   "6. 【🎬 DM 主动导演节奏与反派独立执行铁律】：",
@@ -1057,7 +1228,104 @@ window.disableActiveModelParamsOverride = async function (modelId) {
   }
 };
 
+window.resetFastTrpgPromptToDefault = function () {
+  const sysEl = document.getElementById("stProjSystem");
+  if (sysEl) {
+    sysEl.value = DEFAULT_FAST_TRPG_SYSTEM_PROMPT;
+    window.saveStudioProjectConfig && window.saveStudioProjectConfig(true);
+  }
+};
+
+window.resetAdvancedTrpgPromptToDefault = function () {
+  if (!window.confirm("恢复高级跑团初始模板提示词？")) return;
+  const sysEl = document.getElementById("stProjSystem");
+  if (sysEl) {
+    const intro = "你是一位兼具电影级镜头感与顶级游戏策划功底的【全题材自适应互动叙事主持（AI 导演 / DM）】。\n请根据玩家当前选用的【开场白】或挂载的【角色卡】自动适配世界观与文风（奇幻冒险/悬疑跑团/赛博修仙/日常情感张力），始终以极具画面感与感官细节（光影、声响、气味、微表情）的第二人称（「你」）叙事。NPC 拥有独立动机、秘密与性格底线，绝不无脑顺从玩家；严禁代替玩家做决定或抢说玩家台词。";
+    sysEl.value = `${intro}\n\n${DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT}`;
+    window.saveStudioProjectConfig && window.saveStudioProjectConfig(true);
+  }
+};
+
 function renderStudioSettingsBody(container, proj) {
+  if (String(proj?.id || "") === "proj_fast_trpg") {
+    container.innerHTML = `
+      <div class="studio-section-card" style="display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+          <label style="font-size:0.8rem;font-weight:600;color:var(--text-muted);">跑团提示词</label>
+          <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.resetFastTrpgPromptToDefault && window.resetFastTrpgPromptToDefault()">恢复初始模板</button>
+        </div>
+        <textarea id="stProjSystem" class="form-textarea" rows="25" style="width:100%;font-size:13px;line-height:1.62;" placeholder="在此输入跑团提示词..." onblur="window.saveStudioProjectConfig(false)">${escapeHtml(proj.system_prompt || "")}</textarea>
+      </div>
+    `;
+    if (typeof window.translateSubtree === "function") window.translateSubtree(container);
+    return;
+  }
+
+  if (getProjectCardTier(proj) === "simple") {
+    const sBgUrl = proj.appearance?.bg_image || proj.bg_image || "";
+    const sPromptLen = (proj.system_prompt || "").length;
+    container.innerHTML = `
+      <!-- 简易游戏卡升级横幅 -->
+      <div class="simple-card-upgrade-banner">
+        <div style="flex:1;min-width:200px;">
+          <div style="font-size:12.5px;font-weight:700;color:var(--text-main);margin-bottom:2px;">当前为「简易游戏卡」</div>
+          <div style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">轻量省心模式。如需配置<b>内置 CSS 皮肤、世界书、前后置词、正则脚本或快捷指令</b>，可一键升级为高级卡。</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-xs btn-secondary" onclick="window.openGuidedGameCardModal('${escapeJsAttr(proj.id)}')">三步向导编辑</button>
+          <button type="button" class="btn btn-xs btn-primary" onclick="window.upgradeProjectToAdvanced('${escapeJsAttr(proj.id)}', false)">⬆ 升级为高级卡</button>
+        </div>
+      </div>
+
+      <!-- 简易卡基础信息 -->
+      <div class="studio-section-card">
+        <div class="studio-section-header">
+          <div class="studio-section-title">基础外观与简介</div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(175px, 1fr));gap:10px;margin-bottom:10px;">
+          <div>
+            <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">名称与封面</label>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <div id="stProjIconPreview" class="studio-preview-box" style="width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;cursor:pointer;" onclick="document.getElementById('stProjIconFileInput').click()" title="上传封面">
+                ${getIconHtml(proj.icon || "", 32) || `<span style="font-size:15px;color:var(--text-dim);line-height:1;">+</span>`}
+              </div>
+              <input type="hidden" id="stProjIcon" value="${escapeHtml(proj.icon || "")}" />
+              <input type="file" id="stProjIconFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectIcon(event, 'studio')" />
+              <input type="text" id="stProjName" class="form-input" value="${escapeHtml(proj.name || "")}" placeholder="游戏卡名称" onblur="window.saveStudioProjectConfig(false)" onkeydown="if(event.key==='Enter'){this.blur();}" style="flex:1;min-width:0;" />
+            </div>
+          </div>
+          <div>
+            <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">聊天背景</label>
+            <div class="ai-fused-input-group has-value" style="width:100%;">
+              <input type="text" id="stBgImageInput" class="ai-fused-input" value="${escapeHtml(sBgUrl)}" placeholder="背景图 URL" onchange="window.updateAppearanceConfig('bg_image', this.value)" style="flex:1;min-width:0;" />
+              ${sBgUrl ? `<button type="button" class="ai-fused-sub-btn" onclick="window.updateAppearanceConfig('bg_image', '')">✕</button>` : ""}
+              <button type="button" class="ai-fused-sub-btn" onclick="window.pickStudioGalleryAsset('bg_image')">图库</button>
+              <button type="button" class="ai-fused-sub-btn" onclick="document.getElementById('stProjBgFileInput').click()">传图</button>
+              <input type="file" id="stProjBgFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectBackground(event, 'studio')" />
+            </div>
+          </div>
+        </div>
+        <div>
+          <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">作品简介（展示给玩家，不影响 AI）</label>
+          <textarea id="stProjDesc" rows="2" class="form-textarea" placeholder="一句话介绍你的游戏卡..." onblur="window.saveStudioProjectConfig(false)">${escapeHtml(proj.description || "")}</textarea>
+        </div>
+      </div>
+
+      <!-- 简易卡跑团提示词 -->
+      <div class="studio-section-card" style="display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <label style="font-size:0.82rem;font-weight:700;color:var(--text-main);">跑团提示词</label>
+            <span id="stPromptTokenStat" style="font-size:0.72rem;color:var(--text-muted);">(${sPromptLen} 字)</span>
+          </div>
+          <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.openGuidedGameCardModal('${escapeJsAttr(proj.id)}')">按角色/世界观分步填写</button>
+        </div>
+        <textarea id="stProjSystem" class="form-textarea" rows="20" style="width:100%;font-size:13px;line-height:1.62;" placeholder="在此自由编写跑团设定与规则（留空即为纯净 0 提示词）..." oninput="window.updatePromptCharCount(this)" onblur="window.saveStudioProjectConfig(false)">${escapeHtml(proj.system_prompt || "")}</textarea>
+      </div>
+    `;
+    if (typeof window.translateSubtree === "function") window.translateSubtree(container);
+    return;
+  }
   const sysLen = (proj.system_prompt || "").length;
   const baseCp = proj.completion_params || {};
   const useGlobal = proj.use_global_params !== false;
@@ -1070,6 +1338,10 @@ function renderStudioSettingsBody(container, proj) {
   const ctxTurns = Number(cp.context ?? (useGlobal ? globalCp.max_context_turns : proj.max_context_turns) ?? 16);
   const bgUrl = proj.appearance?.bg_image || "";
   const uiMods = getEffectiveUiModules(proj);
+  const isStatusPanelOn = proj.status_panel_enabled !== false;
+  const enabledUiModCount = uiMods.filter(
+    (m) => m && m.enabled !== false && m.type !== "content_scale" && m.id !== "mod_scale"
+  ).length;
   const curTemp = Number(cp.temperature ?? 0.68);
   const funcBarOpenAttr = window._studioFuncBarSubmenuOpen ? "open" : "";
   const advOpenAttr = window._studioAdvancedSubmenuOpen ? "open" : "";
@@ -1098,12 +1370,23 @@ function renderStudioSettingsBody(container, proj) {
           </div>
         </div>
         <div>
-          <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">背景图</label>
+          <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">电脑背景图</label>
           <div class="ai-fused-input-group has-value" style="width:100%;">
-            <input type="text" id="stBgImageInput" class="ai-fused-input" value="${escapeHtml(bgUrl)}" placeholder="图片 URL" onchange="window.updateAppearanceConfig('bg_image', this.value)" style="flex:1;min-width:0;" />
+            <input type="text" id="stBgImageInput" class="ai-fused-input" value="${escapeHtml(bgUrl)}" placeholder="横屏背景 URL" onchange="window.updateAppearanceConfig('bg_image', this.value)" style="flex:1;min-width:0;" />
             ${bgUrl ? `<button type="button" class="ai-fused-sub-btn" onclick="window.updateAppearanceConfig('bg_image', '')" title="清除">✕</button>` : ""}
+            <button type="button" class="ai-fused-sub-btn" onclick="window.pickStudioGalleryAsset('bg_image')" title="使用图库图片">图库</button>
             <button type="button" class="ai-fused-sub-btn" onclick="document.getElementById('stProjBgFileInput').click()">传图</button>
             <input type="file" id="stProjBgFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectBackground(event, 'studio')" />
+          </div>
+        </div>
+        <div>
+          <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">手机竖屏背景</label>
+          <div class="ai-fused-input-group has-value" style="width:100%;">
+            <input type="text" id="stBgMobileInput" class="ai-fused-input" value="${escapeHtml(proj.appearance?.bg_mobile || "")}" placeholder="竖屏背景 URL" onchange="window.updateAppearanceConfig('bg_mobile', this.value)" style="flex:1;min-width:0;" />
+            ${proj.appearance?.bg_mobile ? `<button type="button" class="ai-fused-sub-btn" onclick="window.updateAppearanceConfig('bg_mobile', '')" title="清除">✕</button>` : ""}
+            <button type="button" class="ai-fused-sub-btn" onclick="window.pickStudioGalleryAsset('bg_mobile')" title="使用图库图片">图库</button>
+            <button type="button" class="ai-fused-sub-btn" onclick="document.getElementById('stProjBgMobileFileInput').click()">传图</button>
+            <input type="file" id="stProjBgMobileFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectMobileBackground(event, 'studio')" />
           </div>
         </div>
       </div>
@@ -1155,16 +1438,22 @@ function renderStudioSettingsBody(container, proj) {
       </div>
     </div>
 
-    <!-- 3. 核心设定 -->
+    <!-- 3. 核心设定 / 提示词 -->
     <div class="studio-section-card">
       <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
-        <div class="studio-section-title">核心设定</div>
-        <div class="ai-fused-input-group">
-          <input type="text" id="stHint_system_prompt" class="ai-fused-input" style="width:165px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-          <button type="button" class="ai-fused-btn" onclick="window.polishStudioField('stProjSystem', 'system_prompt', this, 'stHint_system_prompt')">润色</button>
+        <div class="studio-section-title" style="display:flex;align-items:center;gap:6px;">
+          <span>核心设定</span>
+          <span id="stPromptTokenStat" style="font-size:0.72rem;font-weight:500;color:var(--text-muted);">(${sysLen} 字)</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <div class="ai-fused-input-group">
+            <input type="text" id="stHint_system_prompt" class="ai-fused-input" style="width:165px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
+            <button type="button" class="ai-fused-btn" onclick="window.polishStudioField('stProjSystem', 'system_prompt', this, 'stHint_system_prompt')">润色</button>
+          </div>
+          ${proj.id === "proj_default" ? `<button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.resetAdvancedTrpgPromptToDefault && window.resetAdvancedTrpgPromptToDefault()">恢复初始模板</button>` : ""}
         </div>
       </div>
-      <textarea id="stProjSystem" rows="7" class="form-textarea" placeholder="世界观、规则、人物" oninput="window.updatePromptCharCount(this)" onblur="window.saveStudioProjectConfig(false)">${escapeHtml(proj.system_prompt || "")}</textarea>
+      <textarea id="stProjSystem" rows="12" class="form-textarea" placeholder="留空即为纯净 0 提示词；也可在此编写世界观、规则与人物..." oninput="window.updatePromptCharCount(this)" onblur="window.saveStudioProjectConfig(false)">${escapeHtml(proj.system_prompt || "")}</textarea>
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-subtle);${hasModelOverride ? "opacity:0.48;pointer-events:none;filter:grayscale(0.6);" : ""}">
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
           <span style="font-size:0.74rem;color:var(--text-muted);font-weight:600;">风格</span>
@@ -1188,36 +1477,38 @@ function renderStudioSettingsBody(container, proj) {
       ` : ""}
     </div>
 
-    <!-- 4. 系统提示词 -->
-    <div class="studio-section-card" style="border-color:var(--tc-rgba-245-158-11-0-42, rgba(245,158,11,0.42));background:var(--tc-rgba-245-158-11-0-04, rgba(245,158,11,0.04));">
-      <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
-        <div class="studio-section-title" style="color:var(--tc-fcd34d, #fcd34d);">系统提示词</div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-          <div class="ai-fused-input-group">
-            <input type="text" id="stHint_global_proto" class="ai-fused-input" style="width:125px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-            <button type="button" class="ai-fused-btn" onclick="window.polishGlobalSystemProtocolPrompt(this)">润色</button>
-          </div>
-          <button type="button" class="btn btn-xs btn-outline-secondary" style="border-color:var(--tc-rgba-245-158-11-0-5, rgba(245,158,11,0.5));color:var(--tc-fde68a, #fde68a);" onclick="window.resetGlobalSystemProtocolPrompt()">恢复默认</button>
-        </div>
-      </div>
-      <textarea id="stGlobalSystemProtocolPrompt" rows="12" class="form-textarea" style="font-size:11.5px;line-height:1.55;" placeholder="留空则不发送" oninput="delete this._origRoVal; delete this._lastEnRoVal;" onblur="window.saveStudioProjectConfig(false)">${escapeHtml(upgradeLegacyGlobalProtocolPrompt(proj.system_protocol_prompt ?? "", true))}</textarea>
-    </div>
+
 
     <!-- 5. 功能栏（子菜单：折叠收纳「功能栏」与「功能栏提示词」，实时双向同步） -->
     <details class="advanced-fold-box" id="studioFuncBarSubmenu" ${funcBarOpenAttr} ontoggle="window._studioFuncBarSubmenuOpen = this.open;" style="margin-top:6px;">
-      <summary class="advanced-fold-summary">功能栏</summary>
+      <summary class="advanced-fold-summary" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span>功能栏</span>
+        <span style="font-size:11.5px;font-weight:600;color:${isStatusPanelOn && enabledUiModCount > 0 ? "var(--tc-34d399, #34d399)" : "var(--text-dim)"};margin-left:auto;padding-right:4px;">${isStatusPanelOn ? `已开启 · ${enabledUiModCount} 栏` : "已关闭"}</span>
+      </summary>
       <div class="advanced-fold-body" style="display:flex;flex-direction:column;gap:12px;padding-top:12px;">
         <!-- 5.1 功能栏 -->
         <div class="studio-section-card" id="studioUiModulesSection">
           <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
-            <div class="studio-section-title" title="拖动排序">功能栏</div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+              <div class="studio-section-title" title="拖动排序">功能栏</div>
+              <label class="checkbox-label" style="font-size:0.75rem;font-weight:600;color:${isStatusPanelOn ? "var(--tc-34d399, #34d399)" : "var(--text-muted)"};" title="状态栏总开关：控制是否向 AI 注入功能栏提示词并在聊天中渲染状态面板">
+                <input type="checkbox" class="st-status-panel-sync-cb" ${isStatusPanelOn ? "checked" : ""} onchange="window.handleToggleStudioStatusPanel(this.checked)" />
+                <span>${isStatusPanelOn ? "状态栏已开启" : "状态栏已关闭"}</span>
+              </label>
+            </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
               <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.resetUiModulesToDefault()" title="默认 6 栏">恢复默认</button>
               <button type="button" class="btn btn-xs btn-primary" onclick="window.openAddCustomUiModuleModal()">添加栏位</button>
             </div>
           </div>
-          <div id="stUiModulesList" ondragover="window.onUiModListDragOver && window.onUiModListDragOver(event)" ondrop="window.onUiModListDrop && window.onUiModListDrop(event)" style="display:flex;flex-direction:column;gap:8px;position:relative;">
-            ${uiMods.length === 0 ? `` : uiMods.map((mod, idx) => {
+          ${!isStatusPanelOn ? `
+            <div style="margin-bottom:8px;padding:7px 10px;border-radius:8px;border:1px dashed var(--border-subtle);background:rgba(128,128,128,0.06);font-size:11.5px;color:var(--text-muted);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <span>状态栏已关闭：当前不会向 AI 注入功能栏提示词，下方已配置的栏位将保留但不生效。</span>
+              <button type="button" class="btn btn-xs btn-primary" onclick="window.handleToggleStudioStatusPanel(true)">一键开启</button>
+            </div>
+          ` : ""}
+          <div id="stUiModulesList" ondragover="window.onUiModListDragOver && window.onUiModListDragOver(event)" ondrop="window.onUiModListDrop && window.onUiModListDrop(event)" style="display:flex;flex-direction:column;gap:8px;position:relative;${!isStatusPanelOn ? "opacity:0.48;" : ""}">
+            ${uiMods.length === 0 ? `<div style="padding:10px 12px;border-radius:8px;border:1px dashed var(--border-subtle);color:var(--text-dim);font-size:0.76rem;text-align:center;">暂无启用栏位，勾选「状态栏」或点击上方「恢复默认 / 添加栏位」即可启用</div>` : uiMods.map((mod, idx) => {
               const iconMap = {
                 thinking_fold: "",
                 story_narrative: "",
@@ -1264,7 +1555,7 @@ function renderStudioSettingsBody(container, proj) {
                   <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
                     <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:190px;">
                       <span class="uimod-drag-handle" onmousedown="const c=this.closest('.st-ui-mod-card');if(c)c.setAttribute('draggable','true');" onpointerdown="window.onUiModHandlePointerDown && window.onUiModHandlePointerDown(event)" title="拖动排序" style="cursor:grab;user-select:none;touch-action:none;padding:2px 6px;border-radius:5px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.14);font-size:11px;font-weight:700;color:var(--tc-cbd5e1, #cbd5e1);display:inline-flex;align-items:center;gap:2px;flex-shrink:0;">⠿ #<span class="uimod-seq-num">${idx + 1}</span></span>
-                      <input type="checkbox" class="st-uimod-enabled" ${isEnabled ? "checked" : ""} onchange="window.saveStudioProjectConfig(false); window.renderStudioWorkbench();" title="启用" style="cursor:pointer;" />
+                      <input type="checkbox" class="st-uimod-enabled" ${isEnabled ? "checked" : ""} onchange="window.handleToggleSingleUiModule(this)" title="启用" style="cursor:pointer;" />
                       <span style="font-size:14px;line-height:1;">${ic}</span>
                       <input type="text" class="form-input st-uimod-key" ${stopDragAttr} value="${escapeHtml(mod.key || "")}" placeholder="名称" oninput="delete this._origRoVal; delete this._lastEnRoVal; window.syncUiModulesToPromptBox && window.syncUiModulesToPromptBox();" onblur="window.saveStudioProjectConfig(false)" onkeydown="if(event.key==='Enter'){this.blur();}" style="width:105px;min-width:80px;flex:0 1 120px;padding:3px 7px;font-size:12px;font-weight:700;" title="名称" />
                       <select class="form-select st-uimod-type" ${stopDragAttr} onchange="this.closest('.st-ui-mod-card').dataset.modType=this.value; window.saveStudioProjectConfig(false); window.renderStudioWorkbench();" style="width:auto;padding:2px 20px 2px 6px;font-size:11px;height:25px;" title="类型">
@@ -1314,7 +1605,7 @@ function renderStudioSettingsBody(container, proj) {
         </div>
 
         <!-- 5.2 功能栏提示词 -->
-        <div class="studio-section-card" id="studioUiModulesPromptSection" style="border-color:var(--tc-rgba-99-102-241-0-42, rgba(99,102,241,0.42));background:var(--tc-rgba-99-102-241-0-04, rgba(99,102,241,0.04));">
+        <div class="studio-section-card" id="studioUiModulesPromptSection" style="border-color:var(--tc-rgba-99-102-241-0-42, rgba(99,102,241,0.42));background:var(--tc-rgba-99-102-241-0-04, rgba(99,102,241,0.04));${!isStatusPanelOn ? "opacity:0.48;" : ""}">
           <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
             <div class="studio-section-title" style="color:var(--tc-a5b4fc, #a5b4fc);">功能栏提示词</div>
           </div>
@@ -1333,9 +1624,10 @@ function renderStudioSettingsBody(container, proj) {
             <span style="font-size:0.75rem;color:var(--text-muted);font-weight:600;">润色模型</span>
             <select id="studioAiModelSelect" class="form-select ai-assist-model-select" style="width:auto;max-width:210px;padding:2px 24px 2px 8px;font-size:12px;height:26px;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)"></select>
           </div>
-          <label class="checkbox-label" style="font-size:0.76rem;">
-            <input type="checkbox" id="stStatusPanelEnabled" ${proj.status_panel_enabled !== false ? "checked" : ""} onchange="window.saveStudioProjectConfig(false)" />
-            <span>状态栏 (<span id="stPromptTokenStat">${sysLen} 字</span>)</span>
+          <label class="checkbox-label" style="font-size:0.78rem;font-weight:600;color:${isStatusPanelOn ? "var(--tc-fcd34d, #fcd34d)" : "var(--text-muted)"};" title="状态栏总开关：控制是否向 AI 注入功能栏提示词并在对话中渲染可视化状态面板">
+            <input type="checkbox" id="stStatusPanelEnabled" ${isStatusPanelOn ? "checked" : ""} onchange="window.handleToggleStudioStatusPanel(this.checked)" />
+            <span>状态栏</span>
+            <span id="stStatusPanelStateHint" style="font-size:0.72rem;font-weight:500;color:${isStatusPanelOn ? "var(--tc-34d399, #34d399)" : "var(--text-dim)"};">(${isStatusPanelOn ? `已开启 · ${enabledUiModCount} 栏` : "已关闭"})</span>
           </label>
         </div>
 
@@ -1365,6 +1657,52 @@ function renderStudioSettingsBody(container, proj) {
               </div>
               <textarea id="stProjSuffix" rows="3" class="form-textarea" placeholder="加在每条发言后" onblur="window.saveStudioProjectConfig(false)">${escapeHtml(String(proj.suffix || "").replace(/\n*【当前内容尺度控制[\s\S]*$/, "").trim())}</textarea>
             </div>
+          </div>
+        </div>
+
+        <!-- 内置 CSS 皮肤与详细介绍 -->
+        <div class="studio-section-card" id="studioCustomCssSection">
+          <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+            <div class="studio-section-title">内置 CSS 栏 <span id="stCssCharStat" class="adv-char-counter">(${(proj.custom_css || "").length} 字)</span></div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.insertStudioCustomUiSnippet()">插入 .custom-ui 骨架</button>
+              ${(proj.custom_css || "").trim() ? `<button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.applyStudioCssPreset('')">清空</button>` : ""}
+            </div>
+          </div>
+          <div class="adv-css-preset-bar">
+            <span style="font-size:11.5px;color:var(--text-muted);">官方模板：</span>
+            ${Object.entries(window.OFFICIAL_CSS_PRESETS || {}).map(([pKey, pCfg]) => `
+              <button type="button" class="adv-css-preset-chip" onclick="window.applyStudioCssPreset('${escapeJsAttr(pKey)}')">${escapeHtml(pCfg.label)}</button>
+            `).join("")}
+          </div>
+          <textarea id="stCustomCssInput" rows="5" class="form-textarea adv-code-editor" placeholder="/* 自动隔离作用于聊天舞台 #chatMainStage，支持美化 .bubble 与 .custom-ui */" oninput="document.getElementById('stCssCharStat')&&(document.getElementById('stCssCharStat').textContent='('+this.value.length+' 字)');window.applyProjectCustomCss&&window.applyProjectCustomCss(this.value);" onblur="window.saveStudioProjectConfig(false)">${escapeHtml(proj.custom_css || "")}</textarea>
+          <div style="margin-top:8px;">
+            <label style="font-size:0.74rem;color:var(--text-muted);display:flex;justify-content:space-between;margin-bottom:4px;">
+              <span>详细介绍（展示在欢迎页，支持安全 HTML/Markdown，不影响 AI）</span>
+              <span id="stDetailDescStat" class="adv-char-counter">(${(proj.detailed_description || "").length} 字)</span>
+            </label>
+            <textarea id="stProjDetailedDesc" rows="3" class="form-textarea" placeholder="选填：向玩家展示的排版介绍（自动过滤 <script>/<iframe>）" oninput="document.getElementById('stDetailDescStat')&&(document.getElementById('stDetailDescStat').textContent='('+this.value.length+' 字)')" onblur="window.saveStudioProjectConfig(false)">${escapeHtml(proj.detailed_description || "")}</textarea>
+          </div>
+        </div>
+
+        <!-- 快捷回复指令 (0/10) -->
+        <div class="studio-section-card" id="studioQuickRepliesSection">
+          <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+            <div class="studio-section-title">快捷回复指令 <span class="adv-char-counter">(${Array.isArray(proj.quick_replies) ? proj.quick_replies.length : 0}/10)</span></div>
+            <button type="button" class="btn btn-xs btn-primary" onclick="window.addStudioQuickReply()">+ 新增指令</button>
+          </div>
+          <div id="stQuickRepliesList" style="display:flex;flex-direction:column;gap:6px;">
+            ${Array.isArray(proj.quick_replies) && proj.quick_replies.length > 0
+              ? proj.quick_replies.map((qr, idx) => `
+                  <div class="st-qr-item" data-qr-id="${escapeHtml(qr.id || `qr_${idx + 1}`)}" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                    <input type="text" class="form-input st-qr-label" value="${escapeHtml(qr.label || "")}" placeholder="按钮名(如:侦查)" onblur="window.saveStudioProjectConfig(false)" style="width:105px;padding:3px 7px;font-size:12px;" />
+                    <input type="text" class="form-input st-qr-cmd" value="${escapeHtml(qr.command || "")}" placeholder="/指令(选填)" onblur="window.saveStudioProjectConfig(false)" style="width:92px;padding:3px 7px;font-size:12px;font-family:monospace;" />
+                    <input type="text" class="form-input st-qr-content" value="${escapeHtml(qr.content || "")}" placeholder="点击或输入指令后发送给 AI 的预设内容" onblur="window.saveStudioProjectConfig(false)" style="flex:1;min-width:140px;padding:3px 7px;font-size:12px;" />
+                    <button type="button" class="btn btn-xs btn-danger" onclick="window.removeStudioQuickReply(${idx})">✕</button>
+                  </div>
+                `).join("")
+              : `<div style="padding:4px 8px;color:var(--text-dim);font-size:0.74rem;">暂无快捷指令（添加后将显示在聊天输入框上方供一键点击）</div>`
+            }
           </div>
         </div>
 
@@ -1608,30 +1946,32 @@ function renderStudioSettingsBody(container, proj) {
               <input type="range" ${disabledAttr} id="stRange_max_tokens" min="256" max="65536" step="256" value="${cp.max_tokens ?? 8192}" oninput="window.updateCompletionParam('max_tokens', Number(this.value))" />
             </div>
 
-            <div class="param-slider-row">
-              <div class="param-slider-header" style="gap:6px;">
-                <span>上下文模式</span>
+            <div class="param-slider-row context-integrated-card" style="grid-column: 1 / -1;">
+              <div class="param-slider-header" style="gap:8px;margin-bottom:6px;">
+                <span>上下文</span>
                 <select id="stContextMode" ${disabledAttr} class="form-select" style="width:auto;padding:2px 8px;font-size:12px;height:26px;" onchange="window.updateProjectContextMode(this.value)">
                   <option value="turns" ${cp.context_mode !== "tokens" ? "selected" : ""}>按轮数</option>
                   <option value="tokens" ${cp.context_mode === "tokens" ? "selected" : ""}>按 Token</option>
                 </select>
               </div>
-              <div id="stContextTurnsGroup" style="${cp.context_mode === "tokens" ? "opacity:0.45;pointer-events:none;" : ""}">
-                <div class="param-slider-header" style="margin-top:4px;">
-                  <span style="font-size:12px;color:var(--text-muted);">上下文轮数</span>
-                  <input type="number" ${disabledAttr} class="param-num-input" id="stNum_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateCompletionParam('context', Number(this.value))" />
+              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:12px;align-items:start;">
+                <div id="stContextTurnsGroup" style="${cp.context_mode === "tokens" ? "display:none;" : ""}">
+                  <div class="param-slider-header">
+                    <span style="font-size:12px;color:var(--text-muted);">上下文轮数</span>
+                    <input type="number" ${disabledAttr} class="param-num-input" id="stNum_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateCompletionParam('context', Number(this.value))" />
+                  </div>
+                  <input type="range" ${disabledAttr} id="stRange_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateCompletionParam('context', Number(this.value))" />
+                  <small class="param-item-hint">保留最近 <b id="stContextMsgsCalc">${ctxTurns * 2}</b> 条消息</small>
                 </div>
-                <input type="range" ${disabledAttr} id="stRange_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateCompletionParam('context', Number(this.value))" />
-                <small class="param-item-hint">保留最近 <b id="stContextMsgsCalc">${ctxTurns * 2}</b> 条消息</small>
+                <div>
+                  <div class="param-slider-header">
+                    <span style="font-size:12px;color:var(--text-muted);">上下文上限 (k)</span>
+                    <input type="number" ${disabledAttr} class="param-num-input" id="stNum_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateCompletionParam('max_context_k', Number(this.value))" />
+                  </div>
+                  <input type="range" ${disabledAttr} id="stRange_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateCompletionParam('max_context_k', Number(this.value))" />
+                  <small class="param-item-hint">单位 k</small>
+                </div>
               </div>
-            </div>
-
-            <div class="param-slider-row">
-              <div class="param-slider-header">
-                <span>上下文上限 (k)</span>
-                <input type="number" ${disabledAttr} class="param-num-input" id="stNum_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateCompletionParam('max_context_k', Number(this.value))" />
-              </div>
-              <input type="range" ${disabledAttr} id="stRange_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateCompletionParam('max_context_k', Number(this.value))" />
             </div>
 
             <div class="param-slider-row">
@@ -1783,6 +2123,463 @@ window.previewCgImage = function (url) {
   }
 };
 
+const OFFICIAL_CSS_PRESETS = {
+  campus: {
+    label: "青春校园",
+    css: `/* 青春校园 · 清透蔚蓝手账皮肤 */
+.message-row.assistant .bubble {
+  background: linear-gradient(145deg, rgba(18, 34, 58, 0.88), rgba(15, 25, 42, 0.92));
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(14, 116, 144, 0.14);
+}
+.custom-ui {
+  margin: 12px 0;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: rgba(30, 58, 95, 0.45);
+  border-left: 4px solid #60a5fa;
+  border-top: 1px solid rgba(147, 197, 253, 0.25);
+  color: #e0f2fe;
+  font-size: 0.92em;
+}`
+  },
+  crimson: {
+    label: "粉色诱惑",
+    css: `/* 粉色诱惑 · 暗夜丝绒霓虹皮肤 */
+.message-row.assistant .bubble {
+  background: linear-gradient(145deg, rgba(42, 16, 33, 0.90), rgba(24, 11, 22, 0.94));
+  border: 1px solid rgba(244, 114, 182, 0.36);
+  border-radius: 16px;
+  box-shadow: 0 8px 26px rgba(219, 39, 119, 0.16);
+}
+.custom-ui {
+  margin: 12px 0;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(80, 22, 54, 0.55), rgba(38, 12, 30, 0.65));
+  border: 1px solid rgba(244, 114, 182, 0.42);
+  color: #fce7f3;
+  box-shadow: inset 0 0 14px rgba(244, 114, 182, 0.10);
+}`
+  },
+  classical: {
+    label: "古色古香",
+    css: `/* 古色古香 · 墨金竹简卷轴皮肤 */
+.message-row.assistant .bubble {
+  background: linear-gradient(160deg, rgba(32, 27, 21, 0.94), rgba(22, 19, 15, 0.96));
+  border: 1px solid rgba(212, 166, 90, 0.42);
+  border-radius: 10px;
+  font-family: "Noto Serif SC", "Songti SC", Georgia, serif;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.38);
+}
+.custom-ui {
+  margin: 12px 0;
+  padding: 12px 16px;
+  border-radius: 6px;
+  background: rgba(46, 36, 24, 0.60);
+  border-top: 2px solid #d4a65a;
+  border-bottom: 2px solid #d4a65a;
+  color: #fde68a;
+  letter-spacing: 0.03em;
+}`
+  },
+  tactical: {
+    label: "战术终端",
+    css: `/* 战术终端 · 特勤冷光 HUD 皮肤 */
+.message-row.assistant .bubble {
+  background: linear-gradient(180deg, rgba(11, 20, 30, 0.94), rgba(8, 14, 22, 0.96));
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  border-radius: 8px;
+  box-shadow: 0 0 18px rgba(14, 165, 233, 0.12);
+}
+.custom-ui {
+  margin: 12px 0;
+  padding: 11px 14px;
+  border-radius: 6px;
+  background: rgba(6, 24, 38, 0.72);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-left: 3px solid #38bdf8;
+  color: #bae6fd;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 0.88em;
+}`
+  },
+  abyss: {
+    label: "深渊调查",
+    css: `/* 深渊调查 · 旧日密档暗绿皮肤 */
+.message-row.assistant .bubble {
+  background: linear-gradient(155deg, rgba(16, 28, 24, 0.94), rgba(11, 19, 17, 0.96));
+  border: 1px solid rgba(52, 211, 153, 0.28);
+  border-radius: 12px;
+}
+.custom-ui {
+  margin: 12px 0;
+  padding: 12px 15px;
+  border-radius: 8px;
+  background: rgba(13, 38, 31, 0.62);
+  border: 1px dashed rgba(110, 231, 183, 0.42);
+  color: #d1fae5;
+}`
+  }
+};
+window.OFFICIAL_CSS_PRESETS = OFFICIAL_CSS_PRESETS;
+
+function _splitTopLevelCssSelectors(selectorGroup) {
+  const out = [];
+  let cur = "";
+  let paren = 0;
+  let bracket = 0;
+  let quote = "";
+  for (let i = 0; i < selectorGroup.length; i++) {
+    const ch = selectorGroup[i];
+    if (ch === "\\" && i + 1 < selectorGroup.length) {
+      cur += ch + selectorGroup[i + 1];
+      i++;
+      continue;
+    }
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === "(") paren++;
+    else if (ch === ")" && paren > 0) paren--;
+    else if (ch === "[") bracket++;
+    else if (ch === "]" && bracket > 0) bracket--;
+    if (ch === "," && paren === 0 && bracket === 0) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+function scopeProjectCss(rawCss, scopeRoot = "#chatMainStage") {
+  if (!rawCss || typeof rawCss !== "string") return "";
+  let css = rawCss
+    .replace(/<\/?style[^>]*>/gi, "")
+    .replace(/@import\b[^;]*;?/gi, "")
+    .replace(/expression\s*\([^)]*\)/gi, "")
+    .replace(/url\s*\(\s*['"]?\s*(?:javascript|vbscript|data:text\/html)[^)]*\)/gi, "none")
+    .replace(/(?:-moz-binding|behavior)\s*:[^;}]*/gi, "")
+    .trim();
+  if (!css) return "";
+
+  const transformBlock = (input) => {
+    let res = "";
+    let i = 0;
+    const n = input.length;
+    while (i < n) {
+      if (input[i] === "/" && input[i + 1] === "*") {
+        const endC = input.indexOf("*/", i + 2);
+        if (endC === -1) break;
+        i = endC + 2;
+        continue;
+      }
+      if (/\s/.test(input[i])) {
+        res += input[i++];
+        continue;
+      }
+      let selStart = i;
+      let quote = "";
+      while (i < n) {
+        const ch = input[i];
+        if (ch === "\\" && i + 1 < n) {
+          i += 2;
+          continue;
+        }
+        if (quote) {
+          if (ch === quote) quote = "";
+          i++;
+          continue;
+        }
+        if (ch === "'" || ch === '"') {
+          quote = ch;
+          i++;
+          continue;
+        }
+        if (ch === "/" && input[i + 1] === "*") {
+          const endC = input.indexOf("*/", i + 2);
+          i = endC === -1 ? n : endC + 2;
+          continue;
+        }
+        if (ch === "{" || ch === "}") break;
+        i++;
+      }
+      if (i >= n || input[i] !== "{") {
+        res += input.slice(selStart, Math.min(n, i + 1));
+        i++;
+        continue;
+      }
+      const prelude = input.slice(selStart, i).trim();
+      i++; // skip '{'
+      const bodyStart = i;
+      let depth = 1;
+      quote = "";
+      while (i < n && depth > 0) {
+        const ch = input[i];
+        if (ch === "\\" && i + 1 < n) {
+          i += 2;
+          continue;
+        }
+        if (quote) {
+          if (ch === quote) quote = "";
+          i++;
+          continue;
+        }
+        if (ch === "'" || ch === '"') {
+          quote = ch;
+          i++;
+          continue;
+        }
+        if (ch === "/" && input[i + 1] === "*") {
+          const endC = input.indexOf("*/", i + 2);
+          i = endC === -1 ? n : endC + 2;
+          continue;
+        }
+        if (ch === "{") depth++;
+        else if (ch === "}") depth--;
+        i++;
+      }
+      const innerBody = input.slice(bodyStart, Math.max(bodyStart, i - 1));
+      if (!prelude) continue;
+
+      if (/^@(?:-\w+-)?keyframes\b/i.test(prelude) || /^@font-face\b/i.test(prelude)) {
+        res += `${prelude} {${innerBody}}\n`;
+      } else if (/^@(?:media|supports|container)\b/i.test(prelude)) {
+        res += `${prelude} {\n${transformBlock(innerBody)}\n}\n`;
+      } else if (prelude.startsWith("@")) {
+        continue;
+      } else {
+        const scopedSels = _splitTopLevelCssSelectors(prelude).map((s) => {
+          if (s.startsWith(scopeRoot)) return s;
+          if (/^(?:html|body|:root|\.chat-main)(?=$|[\s>+~.:#\[])/i.test(s)) {
+            return s.replace(/^(?:html|body|:root|\.chat-main)/i, scopeRoot);
+          }
+          return `${scopeRoot} ${s}`;
+        });
+        res += `${scopedSels.join(", ")} {${innerBody}}\n`;
+      }
+    }
+    return res;
+  };
+
+  return transformBlock(css).trim();
+}
+window.scopeProjectCss = scopeProjectCss;
+
+function applyProjectCustomCss(rawCss) {
+  let styleTag = document.getElementById("projectCustomCssTag");
+  const chatMain = document.getElementById("chatMainStage") || document.querySelector(".chat-main");
+  const scoped = scopeProjectCss(String(rawCss || ""), "#chatMainStage #messageContainer");
+  if (chatMain) {
+    chatMain.classList.toggle("has-custom-css", Boolean(scoped));
+  }
+  if (!scoped) {
+    if (styleTag) styleTag.textContent = "";
+    return;
+  }
+  if (!styleTag) {
+    styleTag = document.createElement("style");
+    styleTag.id = "projectCustomCssTag";
+    document.head.appendChild(styleTag);
+  }
+  styleTag.textContent = scoped;
+}
+window.applyProjectCustomCss = applyProjectCustomCss;
+
+window.renderQuickRepliesBar = function () {
+  const bar = document.getElementById("quickRepliesBar");
+  if (!bar) return;
+  const proj = getActiveProjectObj();
+  if (!proj || isSimpleTrpgProject(proj) || !Array.isArray(proj.quick_replies) || proj.quick_replies.length === 0) {
+    bar.style.display = "none";
+    bar.innerHTML = "";
+    return;
+  }
+  const validList = proj.quick_replies.filter((q) => q && (q.label || q.command || q.content)).slice(0, 10);
+  if (validList.length === 0) {
+    bar.style.display = "none";
+    bar.innerHTML = "";
+    return;
+  }
+  bar.style.display = "flex";
+  bar.innerHTML = validList.map((qr, idx) => {
+    const label = qr.label || qr.command || `指令 #${idx + 1}`;
+    const tip = qr.command ? `${qr.command} → ${qr.content || label}` : (qr.content || label);
+    return `<button type="button" class="quick-reply-pill" onclick="window.triggerQuickReplyItem(${idx})" title="${escapeHtml(tip)}">⚡ ${escapeHtml(label)}</button>`;
+  }).join("");
+};
+
+window.triggerQuickReplyItem = function (idx) {
+  const proj = getActiveProjectObj();
+  if (!proj || !Array.isArray(proj.quick_replies)) return;
+  const validList = proj.quick_replies.filter((q) => q && (q.label || q.command || q.content)).slice(0, 10);
+  const qr = validList[idx];
+  if (!qr) return;
+  const textToSend = String(qr.content || qr.command || qr.label || "").trim();
+  if (!textToSend) return;
+  if (qr.auto_send !== false && typeof handleSendMessage === "function") {
+    handleSendMessage(textToSend);
+  } else {
+    const inp = document.getElementById("userInput");
+    if (inp) {
+      inp.value = textToSend;
+      inp.focus();
+      inp.dispatchEvent(new Event("input"));
+    }
+  }
+};
+
+window._galleryPickerCallback = null;
+window.openGalleryAssetPicker = async function (onPickUrl) {
+  const modal = document.getElementById("galleryAssetPickerModal");
+  const body = document.getElementById("galleryAssetPickerBody");
+  if (!modal || !body) return;
+  window._galleryPickerCallback = typeof onPickUrl === "function" ? onPickUrl : null;
+  modal.style.display = "flex";
+  body.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-muted);">正在读取素材图库...</div>`;
+  try {
+    const res = await fetch("/api/gallery");
+    const data = await res.json();
+    const images = Array.isArray(data) ? data : (data.images || []);
+    if (images.length === 0) {
+      body.innerHTML = `
+        <div style="padding:28px;text-align:center;color:var(--text-muted);display:flex;flex-direction:column;gap:10px;align-items:center;">
+          <div>素材图库暂无图片，请先上传图片至图库或直接使用「本地传图」。</div>
+          <button type="button" class="btn btn-sm btn-primary" onclick="document.getElementById('galleryAssetPickerModal').style.display='none';window.openGalleryModal&&window.openGalleryModal();">打开素材图库上传</button>
+        </div>
+      `;
+      return;
+    }
+    body.innerHTML = `
+      <div style="margin-bottom:10px;font-size:12px;color:var(--text-muted);">点击任意图库图片即可选用（共 ${images.length} 张）：</div>
+      <div class="gallery-picker-grid">
+        ${images.map((img) => {
+          const url = img.url || "";
+          const name = img.filename || img.name || "";
+          return `
+            <div class="gallery-picker-tile" onclick="window._confirmGalleryAssetPick('${escapeJsAttr(url)}')" title="${escapeHtml(name)}">
+              <img src="${escapeHtml(url)}" alt="${escapeHtml(name)}" loading="lazy" />
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  } catch (err) {
+    body.innerHTML = `<div style="padding:20px;color:#f87171;">读取素材图库失败: ${escapeHtml(err.message)}</div>`;
+  }
+};
+
+window._confirmGalleryAssetPick = function (url) {
+  const modal = document.getElementById("galleryAssetPickerModal");
+  if (modal) modal.style.display = "none";
+  if (typeof window._galleryPickerCallback === "function") {
+    const cb = window._galleryPickerCallback;
+    window._galleryPickerCallback = null;
+    cb(url);
+  }
+};
+
+window.pickStudioGalleryAsset = function (field) {
+  window.openGalleryAssetPicker((url) => {
+    window.updateAppearanceConfig(field, url);
+    renderStudioWorkbench();
+  });
+};
+
+window.handleUploadProjectMobileBackground = async function (event, mode = "studio") {
+  const file = event.target?.files?.[0];
+  if (!file) return;
+  showToast("上传移动背景中...");
+  try {
+    const url = await uploadImageAndGetUrl(file, 1440, 0.85, "场景CG");
+    if (mode === "advanced" && advancedDraftProject) {
+      syncAdvancedDraftFromDom();
+      if (!advancedDraftProject.appearance) advancedDraftProject.appearance = {};
+      advancedDraftProject.appearance.bg_mobile = url;
+      renderAdvancedProjectEditor();
+      showToast("移动设备背景已上传");
+    } else {
+      const proj = getActiveProjectObj();
+      if (!proj) return;
+      collectCurrentTabFormState();
+      if (!proj.appearance) proj.appearance = {};
+      proj.appearance.bg_mobile = url;
+      applyProjectAppearance(proj);
+      await window.saveStudioProjectConfig(false);
+      renderStudioWorkbench();
+      showToast("移动设备背景已上传");
+    }
+  } catch (err) {
+    showToast("上传失败: " + err.message);
+  } finally {
+    try { event.target.value = ""; } catch (e) {}
+  }
+};
+
+window.applyStudioCssPreset = function (presetKey) {
+  collectCurrentTabFormState();
+  const proj = getActiveProjectObj();
+  if (!proj) return;
+  const nextCss = presetKey && OFFICIAL_CSS_PRESETS[presetKey] ? OFFICIAL_CSS_PRESETS[presetKey].css : "";
+  proj.custom_css = nextCss;
+  if (!proj.appearance) proj.appearance = {};
+  proj.appearance.custom_css = nextCss;
+  const el = document.getElementById("stCustomCssInput");
+  if (el) el.value = nextCss;
+  applyProjectCustomCss(nextCss);
+  window.saveStudioProjectConfig(false);
+  renderStudioWorkbench();
+  showToast(presetKey ? `已套用皮肤：${OFFICIAL_CSS_PRESETS[presetKey].label}` : "已清空内置 CSS");
+};
+
+window.insertStudioCustomUiSnippet = function () {
+  const el = document.getElementById("stCustomCssInput");
+  if (!el) return;
+  const snippet = `\n.custom-ui {\n  padding: 12px 16px;\n  border-radius: 10px;\n  background: rgba(30, 41, 59, 0.72);\n  border: 1px solid rgba(212, 166, 90, 0.42);\n  color: #f8fafc;\n}`;
+  el.value = (el.value ? el.value.trimEnd() + "\n" : "") + snippet.trim();
+  applyProjectCustomCss(el.value);
+  window.saveStudioProjectConfig(false);
+};
+
+window.addStudioQuickReply = function () {
+  collectCurrentTabFormState();
+  const proj = getActiveProjectObj();
+  if (!proj) return;
+  if (!Array.isArray(proj.quick_replies)) proj.quick_replies = [];
+  if (proj.quick_replies.length >= 10) {
+    showToast("最多可添加 10 个快捷回复指令");
+    return;
+  }
+  proj.quick_replies.push({
+    id: `qr_${Date.now().toString(36)}`,
+    label: "",
+    command: "",
+    content: "",
+    auto_send: true
+  });
+  renderStudioWorkbench();
+};
+
+window.removeStudioQuickReply = async function (idx) {
+  collectCurrentTabFormState();
+  const proj = getActiveProjectObj();
+  if (!proj || !Array.isArray(proj.quick_replies)) return;
+  proj.quick_replies.splice(idx, 1);
+  renderStudioWorkbench();
+  await window.saveStudioProjectConfig(false);
+};
+
 window.updateAppearanceConfig = function (field, val) {
   const proj = getActiveProjectObj();
   if (!proj) return;
@@ -1797,13 +2594,19 @@ window.updateAppearanceConfig = function (field, val) {
 };
 
 function applyProjectAppearance(proj) {
-  if (!proj) return;
+  if (!proj) {
+    applyProjectCustomCss("");
+    return;
+  }
   const app = proj.appearance || {};
   document.body.classList.remove("light-theme");
 
   const chatMain = document.querySelector(".chat-main");
   if (chatMain) {
-    const bgUrl = app.bg_image || proj.bg_image || "";
+    const isPortraitView = window.innerWidth <= 768 || document.body.classList.contains("gui-portrait-mode");
+    const bgUrl = (isPortraitView && app.bg_mobile)
+      ? app.bg_mobile
+      : (app.bg_image || proj.bg_image || app.bg_mobile || "");
     chatMain.classList.toggle("has-bg-image", !!bgUrl);
     if (bgUrl) {
       const safeCssUrl = String(bgUrl).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]/g, "");
@@ -1815,8 +2618,27 @@ function applyProjectAppearance(proj) {
       chatMain.style.backgroundImage = "";
     }
   }
+
+  const rawCss = (proj.custom_css !== undefined && proj.custom_css !== null)
+    ? proj.custom_css
+    : (app.custom_css || "");
+  applyProjectCustomCss(rawCss);
+  if (typeof window.renderQuickRepliesBar === "function") {
+    window.renderQuickRepliesBar();
+  }
 }
 window.applyProjectAppearance = applyProjectAppearance;
+
+window.applyTemporaryCgBackground = function (imgUrl) {
+  const chatMain = document.querySelector(".chat-main");
+  if (!chatMain || !imgUrl) return;
+  const safeCssUrl = String(imgUrl).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]/g, "");
+  const overlay = "linear-gradient(var(--tc-rgba-10-14-24-0-62, rgba(10, 14, 24, 0.62)), var(--tc-rgba-10-14-24-0-78, rgba(10, 14, 24, 0.78)))";
+  chatMain.classList.add("has-bg-image");
+  chatMain.style.backgroundImage = `${overlay}, url("${safeCssUrl}")`;
+  chatMain.style.backgroundSize = "cover";
+  chatMain.style.backgroundPosition = "center";
+};
 
 // =========================================================================
 // 3. 提示词与模型参数控制
@@ -1825,7 +2647,100 @@ window.updatePromptCharCount = function (textarea) {
   const stat = document.getElementById("stPromptTokenStat");
   if (!stat || !textarea) return;
   const len = textarea.value.length;
-  stat.textContent = `${len} 字`;
+  stat.textContent = `(${len} 字)`;
+};
+
+function ensureActiveStatusModulesOnEnable(targetProj) {
+  if (!targetProj || typeof targetProj !== "object") return 0;
+  let mods = getEffectiveUiModules(targetProj);
+  const isStatusSub = (m) =>
+    m &&
+    !["thinking_fold", "story_narrative", "action_choices", "content_scale"].includes(m.type) &&
+    !["mod_think", "mod_story", "mod_choices", "mod_scale"].includes(m.id);
+  if (mods.length === 0) {
+    mods = DEFAULT_UNIVERSAL_UI_MODULES.map((m) => ({ ...m, enabled: true }));
+  } else {
+    const statusSubs = mods.filter(isStatusSub);
+    if (statusSubs.length === 0) {
+      const stdSubs = DEFAULT_UNIVERSAL_UI_MODULES.filter(isStatusSub).map((m) => ({ ...m, enabled: true }));
+      const choicesIdx = mods.findIndex((m) => m.type === "action_choices" || m.id === "mod_choices");
+      if (choicesIdx !== -1) {
+        mods.splice(choicesIdx, 0, ...stdSubs);
+      } else {
+        mods.push(...stdSubs);
+      }
+    } else if (statusSubs.every((m) => m.enabled === false)) {
+      mods = mods.map((m) => (isStatusSub(m) ? { ...m, enabled: true } : m));
+    }
+    if (mods.every((m) => m.enabled === false)) {
+      mods = mods.map((m) => ({ ...m, enabled: true }));
+    }
+  }
+  targetProj.ui_modules = mods;
+  return mods.filter((m) => m && m.enabled !== false && m.type !== "content_scale" && m.id !== "mod_scale").length;
+}
+
+window.handleToggleStudioStatusPanel = async function (checked) {
+  const nextChecked = !!checked;
+  const statusEl = document.getElementById("stStatusPanelEnabled");
+  if (statusEl) statusEl.checked = nextChecked;
+  document.querySelectorAll(".st-status-panel-sync-cb").forEach((cb) => {
+    cb.checked = nextChecked;
+  });
+  collectCurrentTabFormState();
+  const proj = getActiveProjectObj();
+  if (!proj) return;
+  proj.status_panel_enabled = nextChecked;
+  let activeCount = 0;
+  if (nextChecked) {
+    activeCount = ensureActiveStatusModulesOnEnable(proj);
+  }
+  const prevScroll = getStudioScrollContainer()?.scrollTop || 0;
+  renderStudioWorkbench();
+  const wbEl = getStudioScrollContainer();
+  if (wbEl) wbEl.scrollTop = prevScroll;
+  await window.saveStudioProjectConfig(false);
+  if (typeof window.renderMessages === "function") {
+    window.renderMessages(undefined, true);
+  }
+  showToast(nextChecked ? `状态栏已开启（已启用 ${activeCount} 个功能栏）` : "状态栏已关闭");
+};
+
+window.handleToggleSingleUiModule = async function (checkboxEl) {
+  const isNowChecked = !!checkboxEl?.checked;
+  if (isNowChecked) {
+    const statusEl = document.getElementById("stStatusPanelEnabled");
+    if (statusEl && !statusEl.checked) statusEl.checked = true;
+  }
+  collectCurrentTabFormState();
+  const proj = getActiveProjectObj();
+  if (!proj) return;
+  if (isNowChecked && proj.status_panel_enabled === false) {
+    proj.status_panel_enabled = true;
+  }
+  const prevScroll = getStudioScrollContainer()?.scrollTop || 0;
+  renderStudioWorkbench();
+  const wbEl = getStudioScrollContainer();
+  if (wbEl) wbEl.scrollTop = prevScroll;
+  await window.saveStudioProjectConfig(false);
+  if (typeof window.renderMessages === "function") {
+    window.renderMessages(undefined, true);
+  }
+};
+
+window.handleToggleAdvStatusPanel = function (checked) {
+  const nextChecked = !!checked;
+  const statusEl = document.getElementById("advStatusPanelEnabled");
+  if (statusEl) statusEl.checked = nextChecked;
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  advancedDraftProject.status_panel_enabled = nextChecked;
+  let activeCount = 0;
+  if (nextChecked) {
+    activeCount = ensureActiveStatusModulesOnEnable(advancedDraftProject);
+  }
+  renderAdvancedProjectEditor();
+  showToast(nextChecked ? `状态栏已开启（将附带 ${activeCount} 个默认功能栏）` : "状态栏已关闭");
 };
 
 window.updateCompletionParam = function (key, val) {
@@ -2123,6 +3038,32 @@ function collectCurrentTabFormState() {
     if (!proj.appearance) proj.appearance = {};
     proj.appearance.bg_image = bgEl.value.trim();
     proj.bg_image = proj.appearance.bg_image;
+  }
+  const bgMobEl = document.getElementById("stBgMobileInput");
+  if (bgMobEl) {
+    if (!proj.appearance) proj.appearance = {};
+    proj.appearance.bg_mobile = bgMobEl.value.trim();
+  }
+  const detDescEl = document.getElementById("stProjDetailedDesc");
+  if (detDescEl) {
+    proj.detailed_description = getRawOrEditedVal(detDescEl).trim();
+  }
+  const stCssEl = document.getElementById("stCustomCssInput");
+  if (stCssEl) {
+    proj.custom_css = stCssEl.value;
+    if (!proj.appearance) proj.appearance = {};
+    proj.appearance.custom_css = stCssEl.value;
+  }
+  const qrListEl = document.getElementById("stQuickRepliesList");
+  if (qrListEl) {
+    const qrItems = Array.from(qrListEl.querySelectorAll(".st-qr-item"));
+    proj.quick_replies = qrItems.slice(0, 10).map((el, idx) => ({
+      id: el.dataset.qrId || `qr_${idx + 1}`,
+      label: getRawOrEditedVal(el.querySelector(".st-qr-label")).trim(),
+      command: getRawOrEditedVal(el.querySelector(".st-qr-cmd")).trim(),
+      content: getRawOrEditedVal(el.querySelector(".st-qr-content")).trim(),
+      auto_send: true
+    })).filter((q) => q.label || q.command || q.content);
   }
   if (preEl) proj.prefix = getRawOrEditedVal(preEl);
   if (sysEl) proj.system_prompt = getRawOrEditedVal(sysEl);
@@ -2623,6 +3564,7 @@ window.confirmAddCustomUiModule = async function () {
         ...newMod,
         enabled: true
       };
+      proj.status_panel_enabled = true;
       document.getElementById("customUiModuleModal").style.display = "none";
       renderStudioWorkbench();
       await window.saveStudioProjectConfig(false);
@@ -2647,6 +3589,7 @@ window.confirmAddCustomUiModule = async function () {
       proj.ui_modules.push(newMod);
     }
   }
+  proj.status_panel_enabled = true;
   document.getElementById("customUiModuleModal").style.display = "none";
   renderStudioWorkbench();
   await window.saveStudioProjectConfig(false);
@@ -2955,6 +3898,7 @@ window.resetUiModulesToDefault = async function () {
   if (!proj) return;
   if (typeof showCustomDialog === "function" && !(await showCustomDialog({ title: "恢复默认栏位", message: "将清除所有自定义栏位，确定吗？" }))) return;
   proj.ui_modules = DEFAULT_UNIVERSAL_UI_MODULES.map((m) => ({ ...m }));
+  proj.status_panel_enabled = true;
   renderStudioWorkbench();
   await window.saveStudioProjectConfig(false);
   if (typeof window.renderMessages === "function") window.renderMessages(undefined, true);
@@ -3458,14 +4402,6 @@ window.saveStudioProjectConfig = async function (showSuccessToast = true) {
 
   const cleanProto = String(proj.system_protocol_prompt ?? "").trim();
   proj.system_protocol_prompt = cleanProto;
-  if (!isFreeChatProject(proj) && proj.id === "proj_default") {
-    if (!window.globalUserSettings) window.globalUserSettings = {};
-    window.globalUserSettings.global_system_protocol_prompt = cleanProto;
-    const modalProtoEl = document.getElementById("settingGlobalSystemProtocolPrompt");
-    if (modalProtoEl && modalProtoEl.value !== cleanProto) {
-      modalProtoEl.value = cleanProto;
-    }
-  }
 
   const payload = {
     ...proj,
@@ -3754,7 +4690,7 @@ window.openExploreModal = async function () {
   if (!modal) return;
   modal.style.display = "flex";
   const titleEl = document.getElementById("exploreModalTitle");
-  if (titleEl) titleEl.textContent = "高级新建";
+  if (titleEl) titleEl.textContent = "游戏卡库";
   const body = document.getElementById("exploreModalBody");
   if (body) body.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text-muted);">加载中...</div>`;
   if (typeof window.translateSubtree === "function") window.translateSubtree(modal);
@@ -3798,31 +4734,72 @@ function renderExploreModalContent() {
   const body = document.getElementById("exploreModalBody");
   if (!body) return;
   const titleEl = document.getElementById("exploreModalTitle");
-  if (titleEl) titleEl.textContent = "高级新建";
+  if (titleEl) titleEl.textContent = "游戏卡库";
 
   const allCards = getAllAdvancedCandidateCards();
   const filtered = allCards;
 
   body.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;padding:10px 14px;border-radius:10px;background:linear-gradient(135deg,var(--tc-rgba-99-102-241-0-14, rgba(99,102,241,0.14)),var(--tc-rgba-139-92-246-0-06, rgba(139,92,246,0.06)));border:1px solid var(--tc-rgba-99-102-241-0-35, rgba(99,102,241,0.35));">
-      <span style="font-size:13px;font-weight:700;color:var(--text-main);">现有剧本 (${allCards.length})</span>
-      <button type="button" class="btn btn-sm btn-primary" style="padding:6px 18px;font-size:13px;font-weight:700;border-radius:8px;" onclick="window.startAdvancedForkEditor(null)">
-        新建
-      </button>
+    <div id="gameCardHubDropZone"
+         ondragover="event.preventDefault(); this.style.borderColor='var(--primary, #d4a65a)';"
+         ondragleave="this.style.borderColor='rgba(212,166,90,0.32)';"
+         ondrop="event.preventDefault(); this.style.borderColor='rgba(212,166,90,0.32)'; window.importGameCardFileList && window.importGameCardFileList(event.dataTransfer?.files);"
+         style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;padding:12px 15px;border-radius:10px;background:linear-gradient(135deg,rgba(212,166,90,0.12),rgba(255,255,255,0.02));border:1px solid rgba(212,166,90,0.32);transition:border-color 0.16s ease;">
+      <div style="display:flex;flex-direction:column;gap:2px;">
+        <span style="font-size:13.5px;font-weight:700;color:var(--text-main);">我的游戏卡 (${allCards.length})</span>
+        <span style="font-size:11.5px;color:var(--text-muted);">支持导入 / 导出酒馆与本工作台 PNG / JSON 游戏卡（也可直接将文件拖入此处）</span>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button type="button" class="btn btn-sm btn-primary" style="padding:6px 14px;font-size:12.5px;font-weight:700;border-radius:8px;" onclick="document.getElementById('globalGameCardImportInput')?.click()">
+          导入游戏卡 (.png / .json)
+        </button>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="document.getElementById('exploreModal').style.display='none'; window.openGuidedGameCardModal && window.openGuidedGameCardModal(null)">
+          简易创作
+        </button>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="window.startAdvancedForkEditor(null)">
+          高级创作
+        </button>
+      </div>
     </div>
 
     <div class="explore-grid">
       ${filtered.map((app) => {
         const descPreview = app.description || (app.system_prompt ? app.system_prompt.slice(0, 90) : "暂无简介");
         const isCurrent = app.id === currentProjectId;
+        const isBuiltin = ["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(app.id);
+        const tier = getProjectCardTier(app);
+        const tierTagHtml = isBuiltin
+          ? `<span class="wb-badge" style="font-size:10.5px;">系统模式</span>`
+          : (tier === "simple"
+              ? `<span class="proj-tier-tag tier-simple">简易卡</span>`
+              : `<span class="proj-tier-tag tier-advanced">高级卡</span>`);
+
+        let actionBtnsHtml = "";
+        if (isBuiltin) {
+          actionBtnsHtml = `
+            <button type="button" class="btn btn-xs btn-primary" style="flex:1;" onclick="window.startAdvancedForkEditor('${escapeJsAttr(app.id)}')">基于模板建高级卡</button>
+          `;
+        } else if (tier === "simple") {
+          actionBtnsHtml = `
+            <button type="button" class="btn btn-xs btn-secondary" style="flex:1;" onclick="document.getElementById('exploreModal').style.display='none'; window.openGuidedGameCardModal && window.openGuidedGameCardModal('${escapeJsAttr(app.id)}')">编辑简易卡</button>
+            <button type="button" class="btn btn-xs btn-primary" onclick="window.upgradeProjectToAdvanced('${escapeJsAttr(app.id)}', true)" title="将此简易卡升级为高级卡并进入三栏工坊">⬆ 升级高级</button>
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.startAdvancedForkEditor('${escapeJsAttr(app.id)}')" title="以此卡克隆新建一张高级卡">克隆</button>
+          `;
+        } else {
+          actionBtnsHtml = `
+            <button type="button" class="btn btn-xs btn-primary" style="flex:1;" onclick="window.startAdvancedEditProject('${escapeJsAttr(app.id)}')">高级编辑</button>
+            <button type="button" class="btn btn-xs btn-secondary" onclick="window.startAdvancedForkEditor('${escapeJsAttr(app.id)}')" title="以此卡克隆新建一张高级卡">克隆</button>
+          `;
+        }
+
         return `
-        <div class="explore-card" style="${isCurrent ? "border-color:var(--tc-rgba-99-102-241-0-55, rgba(99,102,241,0.55));" : ""}">
+        <div class="explore-card" style="${isCurrent ? "border-color:rgba(212,166,90,0.55);" : ""}">
           <div class="explore-card-top">
             <div class="explore-icon">${getIconHtml(app.icon || app.avatar || "", 36)}</div>
             <div style="flex:1;min-width:0;">
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                 <div class="explore-title">${escapeHtml(app.name || "未命名剧本")}</div>
-                ${app._badgeText ? `<span class="wb-badge" style="${app._sourceType === "user" ? "color:var(--tc-93c5fd, #93c5fd);border-color:var(--tc-rgba-59-130-246-0-4, rgba(59,130,246,0.4));" : ""}">${escapeHtml(app._badgeText)}</span>` : ""}
+                ${tierTagHtml}
                 ${isCurrent ? `<span class="wb-badge" style="color:var(--tc-34d399, #34d399);border-color:var(--tc-rgba-16-185-129-0-4, rgba(16,185,129,0.4));">当前</span>` : ""}
               </div>
             </div>
@@ -3833,13 +4810,10 @@ function renderExploreModalContent() {
               ${(app.tags || []).map((t) => `<span class="explore-tag">#${escapeHtml(t)}</span>`).join("")}
             </div>
           ` : ""}
-          <div style="display:flex;gap:8px;margin-top:auto;padding-top:6px;">
-            <button type="button" class="btn btn-xs btn-primary" style="flex:1;" onclick="window.startAdvancedForkEditor('${escapeJsAttr(app.id)}')">
-              沿用
-            </button>
-            <button type="button" class="btn btn-xs btn-secondary" onclick="window.quickForkProjectDirect('${escapeJsAttr(app.id)}')">
-              复制
-            </button>
+          <div style="display:flex;gap:6px;margin-top:auto;padding-top:6px;flex-wrap:wrap;">
+            ${actionBtnsHtml}
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.exportProjectGameCard && window.exportProjectGameCard('${escapeJsAttr(app.id)}', 'png')" title="导出可分享 PNG 游戏卡（兼容酒馆）">PNG卡</button>
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.exportProjectGameCard && window.exportProjectGameCard('${escapeJsAttr(app.id)}', 'json')" title="导出 JSON 游戏卡">JSON</button>
           </div>
         </div>
       `;
@@ -3888,6 +4862,50 @@ window.quickForkProjectDirect = async function (sourceId) {
   }
 };
 
+let currentAdvancedCreatorTab = "basic";
+let advWbSearchQuery = "";
+let advShowDetailedPreview = false;
+
+window.openAdvancedCreatorForProject = async function (projectId) {
+  const modal = document.getElementById("exploreModal");
+  if (modal) modal.style.display = "flex";
+  const pMap = typeof projectsMap !== "undefined" ? projectsMap : window.projectsMap;
+  const found = (pMap && pMap[projectId]) || exploreUserProjectsCache.find((x) => x.id === projectId);
+  if (found) {
+    advancedDraftProject = JSON.parse(JSON.stringify(normalizeProjectClient(found)));
+    currentAdvancedCreatorTab = "basic";
+    advWbSearchQuery = "";
+    renderAdvancedProjectEditor();
+  } else if (typeof window.openExploreModal === "function") {
+    await window.openExploreModal();
+    window.startAdvancedEditProject(projectId);
+  }
+};
+
+window.startAdvancedEditProject = function (sourceId) {
+  const pMap = typeof projectsMap !== "undefined" ? projectsMap : window.projectsMap;
+  const allCards = getAllAdvancedCandidateCards();
+  const src = (sourceId && pMap && pMap[sourceId]) || (sourceId ? allCards.find((x) => x.id === sourceId) : null);
+  if (!src) {
+    window.startAdvancedForkEditor(null);
+    return;
+  }
+  const cloned = JSON.parse(JSON.stringify(normalizeProjectClient(src)));
+  if (["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(cloned.id)) {
+    delete cloned.id;
+    cloned.name = `${src.name || "未命名剧本"} (新)`;
+  }
+  cloned.card_tier = "advanced";
+  cloned.simple_mode = false;
+  if (["极速跑团", "简单跑团"].includes(String(cloned.category || "").trim())) {
+    cloned.category = "";
+  }
+  advancedDraftProject = cloned;
+  currentAdvancedCreatorTab = "basic";
+  advWbSearchQuery = "";
+  renderAdvancedProjectEditor();
+};
+
 window.startAdvancedForkEditor = function (sourceId) {
   const allCards = getAllAdvancedCandidateCards();
   const src = sourceId ? allCards.find((x) => x.id === sourceId) : null;
@@ -3896,45 +4914,67 @@ window.startAdvancedForkEditor = function (sourceId) {
     delete cloned.id;
     cloned._sourceName = src.name || "原剧本";
     cloned.name = `${src.name || "未命名剧本"} (新)`;
+    cloned.card_tier = "advanced";
+    cloned.simple_mode = false;
+    if (["极速跑团", "简单跑团"].includes(String(cloned.category || "").trim())) {
+      cloned.category = "";
+    }
     advancedDraftProject = cloned;
   } else {
-    const defaultMods = Array.isArray(window.DEFAULT_UNIVERSAL_UI_MODULES)
-      ? JSON.parse(JSON.stringify(window.DEFAULT_UNIVERSAL_UI_MODULES))
-      : [];
-    const defaultProto = typeof window.DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT === "string"
-      ? window.DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT
-      : "";
+    const customCount = Object.values(projectsMap || {}).filter(
+      (p) => p && !["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(p.id)
+    ).length;
     advancedDraftProject = normalizeProjectClient({
-      name: `新剧本 #${Object.keys(projectsMap || {}).length + 1}`,
+      name: `新企划 #${customCount + 1}`,
+      card_tier: "advanced",
+      simple_mode: false,
       icon: "",
       description: "",
+      detailed_description: "",
+      custom_css: "",
+      quick_replies: [],
       tags: [],
       opening_greetings: [],
       opening_statement: "",
       prefix: "",
       system_prompt: "",
       suffix: "",
-      system_protocol_prompt: defaultProto,
-      ui_modules: defaultMods,
-      status_panel_enabled: true,
-      appearance: { bg_image: "" },
-      _sourceName: "空白模板"
+      system_protocol_prompt: "",
+      ui_modules: [],
+      status_panel_enabled: false,
+      world_book: [],
+      regex_replaces: [],
+      cg_book: [],
+      appearance: { bg_image: "", bg_mobile: "", custom_css: "" },
+      _sourceName: "空白 0 提示词企划"
     });
   }
+  currentAdvancedCreatorTab = "basic";
+  advWbSearchQuery = "";
+  renderAdvancedProjectEditor();
+};
+
+window.switchAdvancedCreatorTab = function (tabKey) {
+  syncAdvancedDraftFromDom();
+  currentAdvancedCreatorTab = ["basic", "worldbook", "other"].includes(tabKey) ? tabKey : "basic";
   renderAdvancedProjectEditor();
 };
 
 function syncAdvancedDraftFromDom() {
   if (!advancedDraftProject) return;
   const d = advancedDraftProject;
-  const gVal = (id) => {
-    const el = document.getElementById(id);
-    if (!el) return undefined;
+  const getElVal = (el) => {
+    if (!el) return "";
     if (!el.value || !el.value.trim()) return "";
     if (el._origRoVal !== undefined && (el.value === el._lastEnRoVal || el.value.trim() === el._lastEnRoVal)) {
       return el._origRoVal;
     }
     return el.value;
+  };
+  const gVal = (id) => {
+    const el = document.getElementById(id);
+    if (!el) return undefined;
+    return getElVal(el);
   };
 
   const statusEl = document.getElementById("advStatusPanelEnabled");
@@ -3946,6 +4986,9 @@ function syncAdvancedDraftFromDom() {
   }
   if (gVal("advProjName") !== undefined) d.name = gVal("advProjName").trim() || "未命名剧本";
   if (gVal("advProjDesc") !== undefined) d.description = gVal("advProjDesc").trim();
+  if (gVal("advProjDetailedDesc") !== undefined) {
+    d.detailed_description = gVal("advProjDetailedDesc").trim();
+  }
   if (gVal("advProjTags") !== undefined) {
     d.tags = gVal("advProjTags").split(/[,，]/).map((s) => s.trim()).filter(Boolean);
   }
@@ -3954,28 +4997,166 @@ function syncAdvancedDraftFromDom() {
     d.appearance.bg_image = gVal("advBgImageInput").trim();
     d.bg_image = d.appearance.bg_image;
   }
+  if (gVal("advBgMobileInput") !== undefined) {
+    if (!d.appearance) d.appearance = {};
+    d.appearance.bg_mobile = gVal("advBgMobileInput").trim();
+  }
+  const cssEl = document.getElementById("advCustomCssInput");
+  if (cssEl) {
+    d.custom_css = cssEl.value || "";
+    if (!d.appearance) d.appearance = {};
+    d.appearance.custom_css = d.custom_css;
+  }
   if (gVal("advProjPrefix") !== undefined) d.prefix = gVal("advProjPrefix");
   if (gVal("advProjSystem") !== undefined) d.system_prompt = gVal("advProjSystem");
   if (gVal("advProjSuffix") !== undefined) d.suffix = gVal("advProjSuffix");
 
+  // 变量面板 / 状态栏骨架同步
+  const advUiModListEl = document.getElementById("advUiModulesList");
+  if (advUiModListEl) {
+    d.ui_modules = Array.from(advUiModListEl.querySelectorAll(".adv-uimod-row")).map((row, idx) => {
+      const mType = row.querySelector(".adv-uimod-type")?.value || "progress_stats";
+      const mKey = getElVal(row.querySelector(".adv-uimod-key")).trim() || `模块 #${idx + 1}`;
+      const rawFields = getElVal(row.querySelector(".adv-uimod-fields")).trim();
+      const rawDesc = getElVal(row.querySelector(".adv-uimod-desc")).trim();
+      return fillDefaultUiModuleDesc({
+        id: row.dataset.modId || `mod_${idx + 1}`,
+        type: mType,
+        key: mKey,
+        enabled: !!row.querySelector(".adv-uimod-enabled")?.checked,
+        fields: segmentUiModuleFields(rawFields, mType),
+        desc: rawDesc,
+        v: 2
+      });
+    });
+  }
+
+  // 世界书默认样式 & 词条同步（注意搜索过滤开启时仅更新可见词条，未显示词条原样保留！）
+  const wbDefRegionEl = document.getElementById("advWbDefKeyRegion");
+  const wbDefMatchEl = document.getElementById("advWbDefMatch");
+  const wbDefValRegEl = document.getElementById("advWbDefValRegion");
+  if (wbDefRegionEl || wbDefMatchEl || wbDefValRegEl) {
+    if (!d.worldbook_defaults) d.worldbook_defaults = {};
+    if (wbDefRegionEl) d.worldbook_defaults.key_region = Number(wbDefRegionEl.value) || 6;
+    if (wbDefMatchEl) d.worldbook_defaults.match_type = wbDefMatchEl.value || "OR";
+    if (wbDefValRegEl) d.worldbook_defaults.value_region = wbDefValRegEl.value || "System";
+  }
+
+  const advWbListEl = document.getElementById("advWorldbookList");
+  if (advWbListEl) {
+    if (!Array.isArray(d.world_book)) d.world_book = [];
+    Array.from(advWbListEl.querySelectorAll(".adv-wb-item")).forEach((row) => {
+      const origIdx = Number(row.dataset.wbIdx);
+      if (Number.isNaN(origIdx) || !d.world_book[origIdx]) return;
+      const prev = d.world_book[origIdx];
+      const mVal = row.querySelector(".adv-wb-match")?.value || "OR";
+      const isConst = mVal === "CONSTANT";
+      const matchType = isConst ? "OR" : mVal;
+      const rawKeys = getElVal(row.querySelector(".adv-wb-keys")).trim();
+      const parsedKeys = (matchType === "Regex" || /^\/.+\/[gimsuy]*$/.test(rawKeys))
+        ? (rawKeys ? [rawKeys] : [])
+        : rawKeys.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+      const contentStr = getElVal(row.querySelector(".adv-wb-content")).trim();
+      const enabled = !!row.querySelector(".adv-wb-enabled")?.checked;
+      d.world_book[origIdx] = {
+        ...prev,
+        name: getElVal(row.querySelector(".adv-wb-name")).trim() || prev.name || `词条 #${origIdx + 1}`,
+        keys: parsedKeys,
+        constant: isConst,
+        match_type: matchType,
+        key_region: Number(row.querySelector(".adv-wb-keyregion")?.value) || 6,
+        value_region: row.querySelector(".adv-wb-valregion")?.value || "System",
+        content: contentStr,
+        value: contentStr,
+        enabled,
+        enable: enabled
+      };
+    });
+  }
+
+  // 正则脚本同步
+  const advRxListEl = document.getElementById("advRegexList");
+  if (advRxListEl) {
+    d.regex_replaces = Array.from(advRxListEl.querySelectorAll(".adv-rx-item")).map((row, idx) => {
+      const pat = row.querySelector(".adv-rx-pattern")?.value ?? "";
+      const rep = row.querySelector(".adv-rx-replacement")?.value ?? "";
+      const enabled = !!row.querySelector(".adv-rx-enabled")?.checked;
+      const onlyRender = !!row.querySelector(".adv-rx-renderonly")?.checked;
+      const scope = row.querySelector(".adv-rx-scope")?.value || "assistant";
+      return {
+        id: row.dataset.rxId || `rx_${idx + 1}`,
+        name: getElVal(row.querySelector(".adv-rx-name")).trim() || `正则 #${idx + 1}`,
+        pattern: pat,
+        regex: pat,
+        find_regex: pat,
+        replacement: rep,
+        replace: rep,
+        replace_str: rep,
+        scope,
+        target_scope: scope === "assistant" ? 1 : 3,
+        is_only_render: onlyRender,
+        enabled,
+        enable: enabled
+      };
+    });
+    d.regex_scripts = d.regex_replaces;
+  }
+
+  // CG 默认样式 & 列表同步
+  const cgDefSrcEl = document.getElementById("advCgDefSource");
+  const cgDefMatchEl = document.getElementById("advCgDefMatch");
+  const cgDefDispEl = document.getElementById("advCgDefDisplay");
+  if (cgDefSrcEl || cgDefMatchEl || cgDefDispEl) {
+    if (!d.cg_defaults) d.cg_defaults = {};
+    if (cgDefSrcEl) d.cg_defaults.trigger_source = cgDefSrcEl.value || "ai";
+    if (cgDefMatchEl) d.cg_defaults.match_type = cgDefMatchEl.value || "OR";
+    if (cgDefDispEl) d.cg_defaults.display_mode = cgDefDispEl.value || "chat";
+  }
+
+  const advCgListEl = document.getElementById("advCgList");
+  if (advCgListEl) {
+    d.cg_book = Array.from(advCgListEl.querySelectorAll(".adv-cg-item")).map((row, idx) => {
+      const imgUrl = (row.querySelector(".adv-cg-url")?.value || row.dataset.imgUrl || "").trim();
+      const keys = getElVal(row.querySelector(".adv-cg-keys")).split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+      return {
+        id: row.dataset.cgId || `cg_${idx + 1}`,
+        name: getElVal(row.querySelector(".adv-cg-name")).trim() || `特殊CG #${idx + 1}`,
+        url: imgUrl,
+        image_url: imgUrl,
+        keys,
+        trigger_source: row.querySelector(".adv-cg-source")?.value || "ai",
+        match_type: row.querySelector(".adv-cg-match")?.value || "OR",
+        display_mode: row.querySelector(".adv-cg-display")?.value || "chat",
+        enabled: row.querySelector(".adv-cg-enabled") ? !!row.querySelector(".adv-cg-enabled").checked : true,
+        enable: true
+      };
+    });
+  }
+
+  // 预设对话开场白同步
   const advOgListEl = document.getElementById("advOpeningGreetingsList");
   if (advOgListEl) {
     d.opening_greetings = Array.from(advOgListEl.querySelectorAll(".adv-opening-greeting-item")).map((item, idx) => {
       const titleEl = item.querySelector(".adv-og-title");
       const contentEl = item.querySelector(".adv-og-content");
-      const getElVal = (el) => {
-        if (!el) return "";
-        if (el._origRoVal !== undefined && (el.value === el._lastEnRoVal || el.value.trim() === el._lastEnRoVal)) {
-          return el._origRoVal;
-        }
-        return el.value;
-      };
       return {
         id: item.dataset.ogId || `og_${idx + 1}`,
         title: getElVal(titleEl).trim(),
         content: getElVal(contentEl).trim()
       };
     });
+  }
+
+  // 快捷回复指令同步
+  const advQrListEl = document.getElementById("advQuickRepliesList");
+  if (advQrListEl) {
+    d.quick_replies = Array.from(advQrListEl.querySelectorAll(".adv-qr-item")).slice(0, 10).map((row, idx) => ({
+      id: row.dataset.qrId || `qr_${idx + 1}`,
+      label: getElVal(row.querySelector(".adv-qr-label")).trim(),
+      command: getElVal(row.querySelector(".adv-qr-cmd")).trim(),
+      content: getElVal(row.querySelector(".adv-qr-content")).trim(),
+      auto_send: true
+    })).filter((q) => q.label || q.command || q.content);
   }
 
   const { hasModelOverride } = getActiveModelParamOverrideInfo();
@@ -4086,16 +5267,342 @@ window.toggleAdvUseGlobalParams = function (checked) {
   renderAdvancedProjectEditor();
 };
 
-window.clearAdvancedBackground = function () {
+window.clearAdvancedBackground = function (isMobile = false) {
   syncAdvancedDraftFromDom();
   if (!advancedDraftProject) return;
   if (!advancedDraftProject.appearance) advancedDraftProject.appearance = {};
-  advancedDraftProject.appearance.bg_image = "";
-  advancedDraftProject.bg_image = "";
+  if (isMobile) {
+    advancedDraftProject.appearance.bg_mobile = "";
+  } else {
+    advancedDraftProject.appearance.bg_image = "";
+    advancedDraftProject.bg_image = "";
+  }
   renderAdvancedProjectEditor();
 };
 
+window.pickAdvancedGalleryAsset = function (slot, cgIdx = -1) {
+  syncAdvancedDraftFromDom();
+  window.openGalleryAssetPicker((url) => {
+    if (!advancedDraftProject) return;
+    if (!advancedDraftProject.appearance) advancedDraftProject.appearance = {};
+    if (slot === "icon") {
+      advancedDraftProject.icon = url;
+      advancedDraftProject.avatar = url;
+    } else if (slot === "bg_image") {
+      advancedDraftProject.appearance.bg_image = url;
+      advancedDraftProject.bg_image = url;
+    } else if (slot === "bg_mobile") {
+      advancedDraftProject.appearance.bg_mobile = url;
+    } else if (slot === "cg" && cgIdx >= 0 && Array.isArray(advancedDraftProject.cg_book) && advancedDraftProject.cg_book[cgIdx]) {
+      advancedDraftProject.cg_book[cgIdx].url = url;
+      advancedDraftProject.cg_book[cgIdx].image_url = url;
+    }
+    renderAdvancedProjectEditor();
+  });
+};
+
+window.handleUploadAdvCgFile = async function (event, cgIdx) {
+  const file = event.target?.files?.[0];
+  if (!file || !advancedDraftProject) return;
+  syncAdvancedDraftFromDom();
+  showToast("上传 CG 图片中...");
+  try {
+    const url = await uploadImageAndGetUrl(file, 1440, 0.85, "场景CG");
+    if (Array.isArray(advancedDraftProject.cg_book) && advancedDraftProject.cg_book[cgIdx]) {
+      advancedDraftProject.cg_book[cgIdx].url = url;
+      advancedDraftProject.cg_book[cgIdx].image_url = url;
+      renderAdvancedProjectEditor();
+      showToast("CG 图片已上传");
+    }
+  } catch (err) {
+    showToast("CG 上传失败: " + err.message);
+  } finally {
+    try { event.target.value = ""; } catch (e) {}
+  }
+};
+
+window.toggleAdvQuickTag = function (tagStr) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  if (!Array.isArray(advancedDraftProject.tags)) advancedDraftProject.tags = [];
+  const idx = advancedDraftProject.tags.indexOf(tagStr);
+  if (idx === -1) advancedDraftProject.tags.push(tagStr);
+  else advancedDraftProject.tags.splice(idx, 1);
+  renderAdvancedProjectEditor();
+};
+
+window.toggleAdvDetailedPreview = function () {
+  syncAdvancedDraftFromDom();
+  advShowDetailedPreview = !advShowDetailedPreview;
+  renderAdvancedProjectEditor();
+};
+
+window.applyAdvStatusSkeletonPreset = function (presetKey) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  const { enabled, modules } = buildPresetUiModules(presetKey, advancedDraftProject.ui_modules);
+  advancedDraftProject.status_panel_enabled = enabled;
+  advancedDraftProject.ui_modules = modules;
+  renderAdvancedProjectEditor();
+  showToast(enabled ? "已载入变量/状态面板预设骨架" : "已关闭状态面板");
+};
+
+window.addAdvUiModuleRow = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  advancedDraftProject.status_panel_enabled = true;
+  if (!Array.isArray(advancedDraftProject.ui_modules)) advancedDraftProject.ui_modules = [];
+  advancedDraftProject.ui_modules.push({
+    id: `mod_${Date.now().toString(36)}`,
+    key: `自定义面板 #${advancedDraftProject.ui_modules.length + 1}`,
+    type: "progress_stats",
+    enabled: true,
+    fields: "生命: 100/100\n状态: 正常",
+    desc: "根据每回合剧情动态更新数值与状态。",
+    v: 2
+  });
+  renderAdvancedProjectEditor();
+};
+
+window.removeAdvUiModuleRow = function (idx) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject || !Array.isArray(advancedDraftProject.ui_modules)) return;
+  advancedDraftProject.ui_modules.splice(idx, 1);
+  renderAdvancedProjectEditor();
+};
+
+// Tab 2: 世界书管理
+window.updateAdvWbSearch = function (val) {
+  syncAdvancedDraftFromDom();
+  advWbSearchQuery = String(val || "");
+  renderAdvancedProjectEditor();
+  const inp = document.getElementById("advWbSearchInput");
+  if (inp) {
+    inp.focus();
+    inp.setSelectionRange(inp.value.length, inp.value.length);
+  }
+};
+
+window.addAdvWorldbookEntry = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  if (!Array.isArray(advancedDraftProject.world_book)) advancedDraftProject.world_book = [];
+  if (advancedDraftProject.world_book.length >= 2000) {
+    showToast("世界书词条已达 2,000 条上限");
+    return;
+  }
+  const defs = advancedDraftProject.worldbook_defaults || {};
+  const defMatch = defs.match_type || "OR";
+  advancedDraftProject.world_book.unshift({
+    id: `wb_${Date.now().toString(36)}`,
+    name: `词条 #${advancedDraftProject.world_book.length + 1}`,
+    keys: [],
+    constant: defMatch === "CONSTANT",
+    match_type: defMatch === "CONSTANT" ? "OR" : defMatch,
+    key_region: Number(defs.key_region) || 6,
+    value_region: defs.value_region || "System",
+    content: "",
+    value: "",
+    enabled: true,
+    enable: true
+  });
+  advWbSearchQuery = "";
+  renderAdvancedProjectEditor();
+};
+
+window.removeAdvWorldbookEntry = function (origIdx) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject || !Array.isArray(advancedDraftProject.world_book)) return;
+  advancedDraftProject.world_book.splice(origIdx, 1);
+  renderAdvancedProjectEditor();
+};
+
+window.applyAdvWbDefaultsToAll = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject || !Array.isArray(advancedDraftProject.world_book)) return;
+  const defs = advancedDraftProject.worldbook_defaults || {};
+  const defMatch = defs.match_type || "OR";
+  advancedDraftProject.world_book.forEach((wb) => {
+    wb.key_region = Number(defs.key_region) || 6;
+    wb.constant = defMatch === "CONSTANT";
+    wb.match_type = defMatch === "CONSTANT" ? "OR" : defMatch;
+    wb.value_region = defs.value_region || "System";
+  });
+  renderAdvancedProjectEditor();
+  showToast("已将默认样式应用到全部世界书词条");
+};
+
+window.exportAdvWorldbookJson = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  const blob = new Blob([JSON.stringify(advancedDraftProject.world_book || [], null, 2)], { type: "application/json;charset=utf-8" });
+  _triggerBlobDownload(blob, `${(advancedDraftProject.name || "游戏卡").replace(/[\\/:*?"<>|]+/g, "_")}_世界书.json`);
+};
+
+window.importAdvWorldbookJson = function (event) {
+  const file = event.target?.files?.[0];
+  if (!file || !advancedDraftProject) return;
+  syncAdvancedDraftFromDom();
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      const raw = JSON.parse(String(ev.target.result || "{}"));
+      let entries = [];
+      if (Array.isArray(raw)) {
+        entries = raw;
+      } else if (raw && typeof raw === "object") {
+        if (Array.isArray(raw.entries)) entries = raw.entries;
+        else if (raw.entries && typeof raw.entries === "object") entries = Object.values(raw.entries);
+        else if (Array.isArray(raw.world_book)) entries = raw.world_book;
+      }
+      const converted = entries.map((it, idx) => ({
+        id: String(it.id || it.uid || `wb_imp_${Date.now().toString(36)}_${idx}`),
+        name: String(it.name || it.comment || `导入词条 #${idx + 1}`),
+        keys: Array.isArray(it.keys) ? it.keys : (Array.isArray(it.key) ? it.key : String(it.keys || it.key || "").split(/[,，]/).map((s) => s.trim()).filter(Boolean)),
+        constant: Boolean(it.constant),
+        match_type: it.selective ? "AND" : (it.match_type || "OR"),
+        key_region: Number(it.key_region) || 6,
+        value_region: it.value_region || "System",
+        content: String(it.content ?? it.value ?? ""),
+        value: String(it.content ?? it.value ?? ""),
+        enabled: it.enabled !== false && it.disable !== true,
+        enable: it.enabled !== false && it.disable !== true
+      }));
+      if (!Array.isArray(advancedDraftProject.world_book)) advancedDraftProject.world_book = [];
+      advancedDraftProject.world_book.push(...converted);
+      renderAdvancedProjectEditor();
+      showToast(`已导入 ${converted.length} 条世界书词条`);
+    } catch (err) {
+      showToast("解析世界书 JSON 失败: " + err.message);
+    }
+  };
+  reader.readAsText(file);
+  try { event.target.value = ""; } catch (e) {}
+};
+
+// Tab 3: 内置 CSS / 正则 / CG / 快捷指令管理
+window.applyAdvCssPreset = function (presetKey) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  const nextCss = presetKey && OFFICIAL_CSS_PRESETS[presetKey] ? OFFICIAL_CSS_PRESETS[presetKey].css : "";
+  advancedDraftProject.custom_css = nextCss;
+  if (!advancedDraftProject.appearance) advancedDraftProject.appearance = {};
+  advancedDraftProject.appearance.custom_css = nextCss;
+  renderAdvancedProjectEditor();
+  showToast(presetKey ? `已套用官方皮肤：${OFFICIAL_CSS_PRESETS[presetKey].label}` : "已清空内置 CSS");
+};
+
+window.insertAdvCustomUiExample = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  const snippet = `.custom-ui {\n  margin: 10px 0;\n  padding: 12px 16px;\n  border-radius: 10px;\n  background: rgba(30, 41, 59, 0.72);\n  border: 1px solid rgba(212, 166, 90, 0.45);\n  color: #fde68a;\n}`;
+  advancedDraftProject.custom_css = (advancedDraftProject.custom_css ? advancedDraftProject.custom_css.trimEnd() + "\n\n" : "") + snippet;
+  if (!advancedDraftProject.appearance) advancedDraftProject.appearance = {};
+  advancedDraftProject.appearance.custom_css = advancedDraftProject.custom_css;
+  renderAdvancedProjectEditor();
+};
+
+window.refreshAdvCssLivePreview = function (rawCss) {
+  const styleEl = document.getElementById("advCssPreviewScopedStyle");
+  const countEl = document.getElementById("advCssCharCounter");
+  if (countEl) countEl.textContent = `${String(rawCss || "").length} 字`;
+  if (styleEl) {
+    styleEl.textContent = scopeProjectCss(String(rawCss || ""), "#advCssLivePreviewStage");
+  }
+};
+
+window.addAdvRegexRule = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  if (!Array.isArray(advancedDraftProject.regex_replaces)) advancedDraftProject.regex_replaces = [];
+  advancedDraftProject.regex_replaces.push({
+    id: `rx_${Date.now().toString(36)}`,
+    name: `正则规则 #${advancedDraftProject.regex_replaces.length + 1}`,
+    pattern: "",
+    replacement: "",
+    scope: "assistant",
+    is_only_render: true,
+    enabled: true
+  });
+  advancedDraftProject.regex_scripts = advancedDraftProject.regex_replaces;
+  renderAdvancedProjectEditor();
+};
+
+window.removeAdvRegexRule = function (idx) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject || !Array.isArray(advancedDraftProject.regex_replaces)) return;
+  advancedDraftProject.regex_replaces.splice(idx, 1);
+  advancedDraftProject.regex_scripts = advancedDraftProject.regex_replaces;
+  renderAdvancedProjectEditor();
+};
+
+window.addAdvCgEntry = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  if (!Array.isArray(advancedDraftProject.cg_book)) advancedDraftProject.cg_book = [];
+  if (advancedDraftProject.cg_book.length >= 20) {
+    showToast("特殊 CG 最多设置 20 个");
+    return;
+  }
+  const defs = advancedDraftProject.cg_defaults || {};
+  advancedDraftProject.cg_book.push({
+    id: `cg_${Date.now().toString(36)}`,
+    name: `特殊CG #${advancedDraftProject.cg_book.length + 1}`,
+    url: "",
+    image_url: "",
+    keys: [],
+    trigger_source: defs.trigger_source || "ai",
+    match_type: defs.match_type || "OR",
+    display_mode: defs.display_mode || "chat",
+    enabled: true
+  });
+  renderAdvancedProjectEditor();
+};
+
+window.removeAdvCgEntry = function (idx) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject || !Array.isArray(advancedDraftProject.cg_book)) return;
+  advancedDraftProject.cg_book.splice(idx, 1);
+  renderAdvancedProjectEditor();
+};
+
+window.addAdvQuickReply = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  if (!Array.isArray(advancedDraftProject.quick_replies)) advancedDraftProject.quick_replies = [];
+  if (advancedDraftProject.quick_replies.length >= 10) {
+    showToast("最多可添加 10 个快捷回复指令");
+    return;
+  }
+  advancedDraftProject.quick_replies.push({
+    id: `qr_${Date.now().toString(36)}`,
+    label: "",
+    command: "",
+    content: "",
+    auto_send: true
+  });
+  renderAdvancedProjectEditor();
+};
+
+window.removeAdvQuickReply = function (idx) {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject || !Array.isArray(advancedDraftProject.quick_replies)) return;
+  advancedDraftProject.quick_replies.splice(idx, 1);
+  renderAdvancedProjectEditor();
+};
+
+window.updateAdvLiveCounter = function (textareaEl, counterId) {
+  const cEl = document.getElementById(counterId);
+  if (cEl && textareaEl) {
+    cEl.textContent = `${textareaEl.value.length} 字`;
+  }
+};
+
 function renderAdvancedProjectEditor() {
+  const modalEl = document.getElementById("exploreModal");
+  if (modalEl && modalEl.style.display === "none") {
+    modalEl.style.display = "flex";
+  }
   const body = document.getElementById("exploreModalBody");
   if (!body || !advancedDraftProject) return;
   const isAlreadyInEditor = !!document.getElementById("advProjName");
@@ -4114,228 +5621,624 @@ function renderAdvancedProjectEditor() {
   const ctxTurns = Number(cp.context ?? (useGlobal ? globalCp.max_context_turns : d.max_context_turns) ?? 16);
   const bgUrl = d.appearance?.bg_image || d.bg_image || "";
 
+  const isEditingExisting = Boolean(d.id && !["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(d.id));
+  const bgMobileUrl = d.appearance?.bg_mobile || "";
+  const customCssVal = d.custom_css || d.appearance?.custom_css || "";
+  const wbList = Array.isArray(d.world_book) ? d.world_book : [];
+  const rxList = Array.isArray(d.regex_replaces) ? d.regex_replaces : [];
+  const cgList = Array.isArray(d.cg_book) ? d.cg_book : [];
+  const qrList = Array.isArray(d.quick_replies) ? d.quick_replies : [];
+  const uiMods = getEffectiveUiModules(d);
+  const wbDefs = d.worldbook_defaults || { key_region: 6, match_type: "OR", value_region: "System" };
+  const cgDefs = d.cg_defaults || { trigger_source: "ai", match_type: "OR", display_mode: "chat" };
+  const otherExtCount = (customCssVal.trim() ? 1 : 0) + rxList.length + cgList.length + qrList.length + (d.opening_greetings?.length || 0);
+
   const titleEl = document.getElementById("exploreModalTitle");
   if (titleEl) {
-    titleEl.textContent = "高级新建";
+    titleEl.textContent = isEditingExisting ? `高级创作 · 编辑「${d.name || "游戏卡"}」` : "高级创作 · 游戏卡工坊";
   }
 
-  body.innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:12px;">
-      <!-- 顶部导航与一键整套 AI 润色栏 -->
-      <div class="studio-section-card" style="margin:0;padding:10px 14px;background:linear-gradient(135deg,var(--tc-rgba-99-102-241-0-14, rgba(99,102,241,0.14)),var(--tc-rgba-139-92-246-0-08, rgba(139,92,246,0.08)));border-color:var(--tc-rgba-99-102-241-0-4, rgba(99,102,241,0.4));">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-            <button type="button" class="btn btn-xs btn-secondary" onclick="window.backToExploreCardList()">
-              返回
-            </button>
-          </div>
-          <div style="display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;flex-wrap:wrap;min-width:280px;">
-            <div style="display:flex;align-items:center;gap:4px;">
-              <span style="font-size:12px;color:var(--text-muted);font-weight:600;white-space:nowrap;">润色模型</span>
-              <select id="advAiModelSelect" class="form-select ai-assist-model-select" style="width:auto;max-width:195px;padding:3px 24px 3px 8px;font-size:12px;height:28px;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)" title="润色模型"></select>
-            </div>
-            <div class="ai-fused-input-group">
-              <input type="text" id="advGlobalPolishInstruction" class="ai-fused-input" style="width:170px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-              <button type="button" id="btnPolishAllAdv" class="ai-fused-btn" onclick="window.polishAllAdvancedFields(this)" title="润色全部">润色</button>
-            </div>
-            <button type="button" class="btn btn-sm btn-primary" style="background:linear-gradient(135deg,var(--tc-10b981, #10b981),var(--tc-059669, #059669));border-color:var(--tc-10b981, #10b981);" onclick="window.submitAdvancedNewProject()">
-              创建
-            </button>
-          </div>
-        </div>
-      </div>
+  let tabContentHtml = "";
+  if (currentAdvancedCreatorTab === "basic") {
+    const detailedRaw = d.detailed_description || "";
+    const detailedPreviewRendered = advShowDetailedPreview
+      ? `<div style="margin-top:10px;">${
+          typeof window.renderDetailedDescriptionBlock === "function"
+            ? (window.renderDetailedDescriptionBlock(detailedRaw).html || `<div class="detailed-intro-card">（暂无详细介绍内容）</div>`)
+            : `<div class="detailed-intro-card">${escapeHtml(detailedRaw || "（暂无详细介绍内容）")}</div>`
+        }</div>`
+      : "";
 
-      <!-- 1. 基本信息 -->
+    tabContentHtml = `
+      <!-- 1. 作品名称 · 管理标签 · 封面 -->
       <div class="studio-section-card" style="margin:0;">
-        <div class="studio-section-header">
-          <div class="studio-section-title">基本信息</div>
-          <label class="checkbox-label" style="font-size:0.8rem;font-weight:600;">
-            <input type="checkbox" id="advStatusPanelEnabled" ${d.status_panel_enabled !== false ? "checked" : ""} />
-            <span>状态栏</span>
-          </label>
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:8px;">
+          <div class="studio-section-title">基础信息与封面</div>
+          <span style="font-size:11.5px;color:var(--text-muted);">新建游戏卡默认保持纯净 0 提示词；支持 PNG / JPG / WEBP / GIF 封面</span>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px;">
-          <div>
-            <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">图标</label>
-            <div style="display:flex;align-items:center;gap:6px;">
-              <div id="advProjIconPreview" class="studio-preview-box" style="width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;">
-                ${getIconHtml(d.icon || "", 32) || `<span style="font-size:15px;color:var(--text-dim);line-height:1;">+</span>`}
+        <div style="display:grid;grid-template-columns:220px 1fr;gap:14px;align-items:start;margin-bottom:12px;">
+          <!-- 封面卡片 -->
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <label class="gc-field-label">封面</label>
+            <div style="position:relative;height:142px;border-radius:12px;border:1px dashed rgba(255,255,255,0.22);background:rgba(255,255,255,0.025);display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:pointer;" onclick="document.getElementById('advProjIconFileInput').click()" title="点击上传本地封面图片">
+              <div id="advProjIconPreview" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;">
+                ${(d.icon && (d.icon.startsWith("/") || d.icon.startsWith("http") || d.icon.startsWith("data:image/")))
+                  ? `<img src="${escapeHtml(d.icon)}" alt="封面" style="width:100%;height:100%;object-fit:cover;" />`
+                  : `<div style="text-align:center;color:var(--text-muted);font-size:11.5px;padding:8px;"><div style="font-size:24px;color:var(--lp-accent,#d4a65a);">+</div><div>上传封面图片</div><small style="color:var(--text-dim);">导出 PNG 游戏卡卡面</small></div>`
+                }
               </div>
-              <div class="ai-fused-input-group has-value" style="flex:1;min-width:0;">
-                <input type="text" id="advProjIcon" class="ai-fused-input" value="${escapeHtml(d.icon || "")}" oninput="window.previewIconInputChange(this.value, 'advProjIconPreview')" style="flex:1;min-width:0;" />
-                <button type="button" class="ai-fused-sub-btn" onclick="document.getElementById('advProjIconFileInput').click()">传图</button>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="btn btn-xs btn-secondary" style="flex:1;" onclick="document.getElementById('advProjIconFileInput').click()">本地上传</button>
+              <button type="button" class="btn btn-xs btn-outline-secondary" style="flex:1;" onclick="window.pickAdvancedGalleryAsset('icon')">使用图库图片</button>
+              ${d.icon ? `<button type="button" class="btn btn-xs btn-outline-secondary" onclick="document.getElementById('advProjIcon').value='';window.previewIconInputChange('','advProjIconPreview');advancedDraftProject.icon='';advancedDraftProject.avatar='';renderAdvancedProjectEditor();">✕</button>` : ""}
+            </div>
+            <input type="hidden" id="advProjIcon" value="${escapeHtml(d.icon || "")}" />
+            <input type="file" id="advProjIconFileInput" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none;" onchange="window.handleUploadProjectIcon(event, 'advanced')" />
+          </div>
+
+          <!-- 作品名称 + 管理标签 + 简介 -->
+          <div style="display:flex;flex-direction:column;gap:10px;min-width:0;">
+            <div style="display:grid;grid-template-columns:1fr 1.2fr;gap:10px;">
+              <div>
+                <label class="gc-field-label">作品名称</label>
+                <input type="text" id="advProjName" class="form-input" value="${escapeHtml(d.name || "")}" placeholder="请输入作品名称" />
               </div>
-              <input type="file" id="advProjIconFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectIcon(event, 'advanced')" />
+              <div>
+                <label class="gc-field-label">管理标签 <small>（逗号分隔或点选下方快捷标签）</small></label>
+                <input type="text" id="advProjTags" class="form-input" value="${escapeHtml((d.tags || []).join(", "))}" placeholder="奇幻, 潜入, 多分支" />
+              </div>
             </div>
-          </div>
-          <div>
-            <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">名称</label>
-            <input type="text" id="advProjName" class="form-input" value="${escapeHtml(d.name || "")}" placeholder="名称" />
-          </div>
-          <div>
-            <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">标签</label>
-            <input type="text" id="advProjTags" class="form-input" value="${escapeHtml((d.tags || []).join(", "))}" placeholder="奇幻, 跑团" />
+            <div style="display:flex;flex-wrap:wrap;gap:5px;">
+              ${(typeof GUIDED_QUICK_TAGS !== "undefined" ? GUIDED_QUICK_TAGS : ["奇幻", "潜入", "悬疑", "赛博", "古风", "校园", "生存", "多分支"]).map((tg) => {
+                const active = (d.tags || []).includes(tg);
+                return `<button type="button" class="gc-tag-chip ${active ? "active" : ""}" onclick="window.toggleAdvQuickTag('${escapeJsAttr(tg)}')">#${escapeHtml(tg)}</button>`;
+              }).join("")}
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
+                <label class="gc-field-label" style="margin:0;">简介 <small>（给作品写一句简短介绍，选填，不影响 AI 回复）</small></label>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span id="advDescCounter" class="adv-char-counter">${(d.description || "").length} 字</span>
+                  <div class="ai-fused-input-group">
+                    <input type="text" id="advHint_description" class="ai-fused-input" style="width:130px;" placeholder="润色想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
+                    <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjDesc', 'description', this, 'advHint_description')">润色</button>
+                  </div>
+                </div>
+              </div>
+              <textarea id="advProjDesc" rows="2" class="form-textarea" placeholder="一句话展示在游戏卡列表与 PNG 海报卡面上..." oninput="window.updateAdvLiveCounter(this, 'advDescCounter')">${escapeHtml(d.description || "")}</textarea>
+            </div>
           </div>
         </div>
 
-        <div style="margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
-            <label style="font-size:0.74rem;color:var(--text-muted);">简介</label>
-            <div class="ai-fused-input-group">
-              <input type="text" id="advHint_description" class="ai-fused-input" style="width:150px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-              <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjDesc', 'description', this, 'advHint_description')">润色</button>
+        <!-- 详细介绍（支持 Markdown / 安全 HTML + 调试与预览） -->
+        <div style="padding-top:10px;border-top:1px solid var(--border-subtle);">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+            <label class="gc-field-label" style="margin:0;">详细介绍 <small>（支持完整 HTML/CSS/JS 交互开局设定器或 Markdown，独立安全沙箱运行，不影响 AI 回复）</small></label>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span id="advDetailDescCounter" class="adv-char-counter">${detailedRaw.length} 字</span>
+              <button type="button" class="btn btn-xs ${advShowDetailedPreview ? "btn-primary" : "btn-outline-secondary"}" onclick="window.toggleAdvDetailedPreview()">
+                ${advShowDetailedPreview ? "收起预览" : "调试与预览"}
+              </button>
             </div>
           </div>
-          <textarea id="advProjDesc" rows="2" class="form-textarea" placeholder="简介">${escapeHtml(d.description || "")}</textarea>
-        </div>
-
-        <div>
-          <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:4px;">背景图</label>
-          <div style="display:flex;align-items:center;gap:6px;">
-            <div class="studio-preview-box" style="width:52px;height:36px;border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;font-size:0.68rem;color:var(--text-dim);">
-              ${bgUrl
-                ? `<img src="${escapeHtml(bgUrl)}" alt="背景" style="width:100%;height:100%;object-fit:cover;cursor:pointer;" onclick="window.previewCgImage('${escapeJsAttr(bgUrl)}')" />`
-                : `默认`
-              }
-            </div>
-            <div class="ai-fused-input-group has-value" style="flex:1;min-width:0;">
-              <input type="text" id="advBgImageInput" class="ai-fused-input" value="${escapeHtml(bgUrl)}" placeholder="图片 URL" style="flex:1;min-width:0;" />
-              ${bgUrl ? `<button type="button" class="ai-fused-sub-btn" onclick="window.clearAdvancedBackground()" title="清除">清除</button>` : ""}
-              <button type="button" class="ai-fused-sub-btn" onclick="document.getElementById('advProjBgFileInput').click()">传图</button>
-            </div>
-            <input type="file" id="advProjBgFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectBackground(event, 'advanced')" />
-          </div>
+          <textarea id="advProjDetailedDesc" rows="3" class="form-textarea" placeholder="支持 Markdown 与安全 HTML 样式卡片，将在进入该游戏卡时的欢迎页展示..." oninput="window.updateAdvLiveCounter(this, 'advDetailDescCounter')">${escapeHtml(detailedRaw)}</textarea>
+          ${detailedPreviewRendered}
         </div>
       </div>
 
-      <!-- 1.5 开场白 -->
+      <!-- 2. 主提示词 -->
       <div class="studio-section-card" style="margin:0;">
         <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
-          <div class="studio-section-title">开场白</div>
-          <button type="button" class="btn btn-xs btn-primary" onclick="window.addAdvOpeningGreeting()">新增</button>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="studio-section-title">提示词（主提示词）</div>
+            <span id="advSysCounter" class="adv-char-counter">${(d.system_prompt || "").length} 字</span>
+          </div>
+          <div class="ai-fused-input-group">
+            <input type="text" id="advHint_system_prompt" class="ai-fused-input" style="width:165px;" placeholder="润色想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
+            <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjSystem', 'system_prompt', this, 'advHint_system_prompt')">润色</button>
+          </div>
         </div>
-        <div id="advOpeningGreetingsList" style="display:flex;flex-direction:column;gap:8px;">
-          ${Array.isArray(d.opening_greetings) && d.opening_greetings.length > 0
-            ? d.opening_greetings.map((og, idx) => {
-                const titleVal = typeof og === "object" ? (og.title || "") : "";
-                const contentVal = typeof og === "string" ? og : (og.content || og.text || "");
-                const ogId = (typeof og === "object" && og.id) ? og.id : `og_${idx + 1}`;
+        <div class="adv-note-box" style="margin-bottom:8px;">
+          1. 主提示词用于实现世界观、角色设定与核心规则（留空则保持 0 提示词纯净模式，建议保持左对齐与层级清晰）。<br/>
+          2. 如需让 AI 输出自定义 HTML 界面块，可写在 <code>&lt;Reply Example&gt;&lt;div class='custom-ui'&gt;...&lt;/div&gt;&lt;/Reply Example&gt;</code> 内，并前往 <b>「03 其他设置 · CSS」</b> 编写 <code>.custom-ui</code> 专属样式。
+        </div>
+        <textarea id="advProjSystem" rows="9" class="form-textarea" placeholder="在此编写世界观、登场人物与游玩规则..." oninput="window.updateAdvLiveCounter(this, 'advSysCounter')">${escapeHtml(d.system_prompt || "")}</textarea>
+      </div>
+
+      <!-- 3. 前置词 & 后置词 -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:12px;">
+        <div class="studio-section-card" style="margin:0;">
+          <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div class="studio-section-title">前置词</div>
+              <span id="advPrefixCounter" class="adv-char-counter">${(d.prefix || "").length} 字</span>
+            </div>
+            <div class="ai-fused-input-group">
+              <input type="text" id="advHint_prefix" class="ai-fused-input" style="width:120px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
+              <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjPrefix', 'prefix', this, 'advHint_prefix')">润色</button>
+            </div>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:6px;">系统自动拼接在用户输入之前，可辅助触发世界书或设定本轮前置语境</div>
+          <textarea id="advProjPrefix" rows="3" class="form-textarea" placeholder="拼接在玩家每轮输入前（选填）" oninput="window.updateAdvLiveCounter(this, 'advPrefixCounter')">${escapeHtml(d.prefix || "")}</textarea>
+        </div>
+
+        <div class="studio-section-card" style="margin:0;">
+          <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div class="studio-section-title">后置词</div>
+              <span id="advSuffixCounter" class="adv-char-counter">${(d.suffix || "").length} 字</span>
+            </div>
+            <div class="ai-fused-input-group">
+              <input type="text" id="advHint_suffix" class="ai-fused-input" style="width:120px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
+              <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjSuffix', 'suffix', this, 'advHint_suffix')">润色</button>
+            </div>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:6px;">系统自动拼接在用户输入之后（最高注意力权重区），适合放置格式收尾守则</div>
+          <textarea id="advProjSuffix" rows="3" class="form-textarea" placeholder="拼接在玩家每轮输入后（选填）" oninput="window.updateAdvLiveCounter(this, 'advSuffixCounter')">${escapeHtml(d.suffix || "")}</textarea>
+        </div>
+      </div>
+
+      <!-- 4. 使用变量面板 / 状态栏 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:8px;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div class="studio-section-title">使用变量面板 / 状态栏</div>
+            <label class="checkbox-label" style="font-size:0.8rem;font-weight:600;color:${d.status_panel_enabled !== false ? "var(--tc-34d399, #34d399)" : "var(--text-muted)"};">
+              <input type="checkbox" id="advStatusPanelEnabled" ${d.status_panel_enabled !== false ? "checked" : ""} onchange="window.handleToggleAdvStatusPanel(this.checked)" />
+              <span>${d.status_panel_enabled !== false ? `已开启 (${uiMods.filter((m) => m.enabled !== false).length} 栏)` : "未开启（点击启用数据骨架与变量提示词）"}</span>
+            </label>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.applyAdvStatusSkeletonPreset('standard')">标准 6 栏</button>
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.applyAdvStatusSkeletonPreset('tactical')">战术身体栏</button>
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.applyAdvStatusSkeletonPreset('investigative')">调查线索栏</button>
+            <button type="button" class="btn btn-xs btn-primary" onclick="window.addAdvUiModuleRow()">+ 添加面板栏位</button>
+          </div>
+        </div>
+        <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:8px;">开启后可为作品配置数据骨架、面板组件类型与变量提示词，聊天中自动渲染实时状态面板。</div>
+        ${d.status_panel_enabled !== false ? `
+          <div id="advUiModulesList" style="display:flex;flex-direction:column;gap:8px;">
+            ${uiMods.map((mod, idx) => `
+              <div class="adv-uimod-row" data-mod-id="${escapeHtml(mod.id || `mod_${idx + 1}`)}" style="padding:8px 10px;border-radius:8px;border:1px solid var(--border-subtle);background:rgba(255,255,255,0.025);display:flex;flex-direction:column;gap:6px;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <input type="checkbox" class="adv-uimod-enabled" ${mod.enabled !== false ? "checked" : ""} />
+                  <input type="text" class="form-input adv-uimod-key" value="${escapeHtml(mod.key || "")}" placeholder="栏位名称" style="width:130px;padding:3px 8px;font-size:12px;font-weight:700;" />
+                  <select class="form-select adv-uimod-type" style="width:auto;padding:2px 22px 2px 8px;height:26px;font-size:11.5px;">
+                    <option value="thinking_fold" ${mod.type === "thinking_fold" ? "selected" : ""}>思考折叠</option>
+                    <option value="story_narrative" ${mod.type === "story_narrative" ? "selected" : ""}>剧情正文</option>
+                    <option value="progress_stats" ${mod.type === "progress_stats" ? "selected" : ""}>数值进度条</option>
+                    <option value="equipment_slots" ${mod.type === "equipment_slots" ? "selected" : ""}>身体/装备槽</option>
+                    <option value="inventory_grid" ${mod.type === "inventory_grid" ? "selected" : ""}>背包物品格</option>
+                    <option value="npc_affinity" ${mod.type === "npc_affinity" ? "selected" : ""}>角色好感卡</option>
+                    <option value="text_card" ${mod.type === "text_card" || mod.type === "tags" ? "selected" : ""}>情报线索卡</option>
+                    <option value="action_choices" ${mod.type === "action_choices" ? "selected" : ""}>底部行动选项</option>
+                  </select>
+                  <button type="button" class="btn btn-xs btn-danger" style="margin-left:auto;" onclick="window.removeAdvUiModuleRow(${idx})">删除</button>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                  <textarea rows="2" class="form-textarea adv-uimod-fields" placeholder="数据骨架（如 生命: 100/100）" style="font-size:12px;">${escapeHtml(mod.fields || "")}</textarea>
+                  <textarea rows="2" class="form-textarea adv-uimod-desc" placeholder="变量提示词（告诉 AI 如何更新此栏位）" style="font-size:12px;">${escapeHtml(mod.desc || "")}</textarea>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
+      </div>
+    `;
+  } else if (currentAdvancedCreatorTab === "worldbook") {
+    const qLower = advWbSearchQuery.trim().toLowerCase();
+    const filteredWb = wbList
+      .map((wb, origIdx) => ({ wb, origIdx }))
+      .filter(({ wb }) => {
+        if (!qLower) return true;
+        const kStr = Array.isArray(wb.keys) ? wb.keys.join(" ") : String(wb.keys || "");
+        return (
+          String(wb.name || "").toLowerCase().includes(qLower) ||
+          kStr.toLowerCase().includes(qLower) ||
+          String(wb.content || wb.value || "").toLowerCase().includes(qLower)
+        );
+      });
+
+    tabContentHtml = `
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:8px;">
+          <div class="studio-section-title">世界书设置 <span class="adv-char-counter">(${wbList.length} / 2,000)</span></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <input type="text" id="advWbSearchInput" class="form-input" style="width:210px;padding:4px 10px;font-size:12px;" value="${escapeHtml(advWbSearchQuery)}" placeholder="搜索触发关键词 / 内容..." oninput="window.updateAdvWbSearch(this.value)" />
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="document.getElementById('advWbImportFileInput').click()">导入 JSON</button>
+            <input type="file" id="advWbImportFileInput" accept=".json" style="display:none;" onchange="window.importAdvWorldbookJson(event)" />
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.exportAdvWorldbookJson()">导出 JSON</button>
+            <button type="button" class="btn btn-xs btn-primary" onclick="window.addAdvWorldbookEntry()">+ 新增词条</button>
+          </div>
+        </div>
+
+        <div class="adv-note-box" style="margin-bottom:10px;">
+          1. 上限 2,000 个词条，适合存放无需每轮常驻的角色档案、支线剧情、门派势力、隐藏彩蛋等按需触发设定。<br/>
+          2. 请勿使用“。”、“，”、“你”、“我”、“他”等极高频字词作为触发词以免无意义消耗上下文；需要每轮常驻的设定请直接放入主提示词或将格式设为「常驻」。
+        </div>
+
+        <!-- 世界书默认样式 -->
+        <div class="adv-default-bar" style="margin-bottom:12px;">
+          <b style="color:var(--text-main);">世界书默认样式：</b>
+          <span>触发区域</span>
+          <select id="advWbDefKeyRegion" class="form-select" style="width:auto;padding:2px 22px 2px 8px;height:26px;font-size:12px;">
+            <option value="6" ${Number(wbDefs.key_region || 6) === 6 ? "selected" : ""}>玩家输入 + AI 回复</option>
+            <option value="2" ${Number(wbDefs.key_region) === 2 ? "selected" : ""}>仅玩家输入</option>
+            <option value="4" ${Number(wbDefs.key_region) === 4 ? "selected" : ""}>仅 AI 回复</option>
+          </select>
+          <span>格式</span>
+          <select id="advWbDefMatch" class="form-select" style="width:auto;padding:2px 22px 2px 8px;height:26px;font-size:12px;">
+            <option value="OR" ${wbDefs.match_type === "OR" ? "selected" : ""}>或 OR (任一命中)</option>
+            <option value="AND" ${wbDefs.match_type === "AND" ? "selected" : ""}>与 AND (全部命中)</option>
+            <option value="Regex" ${wbDefs.match_type === "Regex" ? "selected" : ""}>正则 Regex</option>
+            <option value="CONSTANT" ${wbDefs.match_type === "CONSTANT" ? "selected" : ""}>常驻触发</option>
+          </select>
+          <span>影响范围（注入位置）</span>
+          <select id="advWbDefValRegion" class="form-select" style="width:auto;padding:2px 22px 2px 8px;height:26px;font-size:12px;">
+            <option value="System" ${wbDefs.value_region !== "Prefix" && wbDefs.value_region !== "Suffix" ? "selected" : ""}>系统设定区 (System)</option>
+            <option value="Prefix" ${wbDefs.value_region === "Prefix" ? "selected" : ""}>前置区 (Prefix)</option>
+            <option value="Suffix" ${wbDefs.value_region === "Suffix" ? "selected" : ""}>后置区 (Suffix)</option>
+          </select>
+          ${wbList.length > 0 ? `<button type="button" class="btn btn-xs btn-outline-secondary" style="margin-left:auto;" onclick="window.applyAdvWbDefaultsToAll()">应用到现有词条</button>` : ""}
+        </div>
+
+        <div id="advWorldbookList" style="display:flex;flex-direction:column;gap:8px;">
+          ${filteredWb.length === 0
+            ? `<div style="padding:18px;border:1px dashed var(--border-subtle);border-radius:10px;text-align:center;color:var(--text-dim);font-size:12.5px;">${qLower ? "没有匹配搜索条件的世界书词条" : "暂无世界书词条，点击右上角「+ 新增词条」或「导入 JSON」添加"}</div>`
+            : filteredWb.map(({ wb, origIdx }) => {
+                const keysStr = Array.isArray(wb.keys) ? wb.keys.join(", ") : String(wb.keys || "");
+                const rawMt = wb.constant ? "CONSTANT" : (wb.match_type === 1 || wb.match_type === "AND" ? "AND" : (wb.match_type === 3 || wb.match_type === "Regex" ? "Regex" : "OR"));
+                const keyReg = Number(wb.key_region) || 6;
+                const valReg = (wb.value_region === 2 || wb.value_region === "Prefix") ? "Prefix" : ((wb.value_region === 4 || wb.value_region === "Suffix") ? "Suffix" : "System");
+                const contentVal = wb.content !== undefined ? wb.content : (wb.value || "");
+                const isEn = (wb.enabled !== undefined ? wb.enabled : wb.enable) !== false;
                 return `
-                  <div class="adv-opening-greeting-item" data-og-id="${escapeHtml(ogId)}" style="display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--border-subtle);background:rgba(128,128,128,0.05);">
-                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                      <span style="font-size:11.5px;font-weight:700;color:var(--primary);padding:1px 7px;border-radius:999px;background:var(--tc-rgba-99-102-241-0-12, rgba(99,102,241,0.12));white-space:nowrap;">#${idx + 1}</span>
-                      <input type="text" class="form-input adv-og-title" value="${escapeHtml(titleVal)}" placeholder="标题" style="flex:1;min-width:120px;padding:4px 8px;font-size:12px;" />
-                      <div class="ai-fused-input-group">
-                        <input type="text" id="advHint_og_${idx}" class="ai-fused-input adv-og-hint" style="width:135px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-                        <button type="button" class="ai-fused-btn" onclick="window.polishAdvOpeningGreeting(${idx}, this, 'advHint_og_${idx}')">润色</button>
-                      </div>
-                      <button type="button" class="btn btn-xs btn-danger" onclick="window.removeAdvOpeningGreeting(${idx})">删除</button>
+                  <div class="adv-wb-item" data-wb-idx="${origIdx}" style="padding:10px 12px;border-radius:10px;border:1px solid var(--border-subtle);background:rgba(255,255,255,0.025);display:flex;flex-direction:column;gap:8px;">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                      <label class="checkbox-label" style="font-size:12px;margin:0;">
+                        <input type="checkbox" class="adv-wb-enabled" ${isEn ? "checked" : ""} />
+                        <span>启用</span>
+                      </label>
+                      <input type="text" class="form-input adv-wb-name" value="${escapeHtml(wb.name || `词条 #${origIdx + 1}`)}" placeholder="词条备注名" style="width:140px;padding:4px 8px;font-size:12px;font-weight:600;" />
+                      <input type="text" class="form-input adv-wb-keys" value="${escapeHtml(keysStr)}" placeholder="触发关键词（多个用逗号分隔）" style="flex:1;min-width:160px;padding:4px 8px;font-size:12px;" />
+                      <select class="form-select adv-wb-keyregion" style="width:auto;padding:2px 20px 2px 6px;height:26px;font-size:11.5px;" title="触发区域">
+                        <option value="6" ${keyReg === 6 ? "selected" : ""}>玩家+AI</option>
+                        <option value="2" ${keyReg === 2 ? "selected" : ""}>仅玩家</option>
+                        <option value="4" ${keyReg === 4 ? "selected" : ""}>仅AI</option>
+                      </select>
+                      <select class="form-select adv-wb-match" style="width:auto;padding:2px 20px 2px 6px;height:26px;font-size:11.5px;" title="匹配格式">
+                        <option value="OR" ${rawMt === "OR" ? "selected" : ""}>或 OR</option>
+                        <option value="AND" ${rawMt === "AND" ? "selected" : ""}>与 AND</option>
+                        <option value="Regex" ${rawMt === "Regex" ? "selected" : ""}>Regex</option>
+                        <option value="CONSTANT" ${rawMt === "CONSTANT" ? "selected" : ""}>常驻</option>
+                      </select>
+                      <select class="form-select adv-wb-valregion" style="width:auto;padding:2px 20px 2px 6px;height:26px;font-size:11.5px;" title="注入范围">
+                        <option value="System" ${valReg === "System" ? "selected" : ""}>System</option>
+                        <option value="Prefix" ${valReg === "Prefix" ? "selected" : ""}>Prefix</option>
+                        <option value="Suffix" ${valReg === "Suffix" ? "selected" : ""}>Suffix</option>
+                      </select>
+                      <button type="button" class="btn btn-xs btn-danger" onclick="window.removeAdvWorldbookEntry(${origIdx})">删除</button>
                     </div>
-                    <textarea rows="3" class="form-textarea adv-og-content" placeholder="开场白">${escapeHtml(contentVal)}</textarea>
+                    <textarea rows="3" class="form-textarea adv-wb-content" placeholder="命中关键词后动态注入的设定内容（单条上限 40,000 字）">${escapeHtml(contentVal)}</textarea>
                   </div>
                 `;
               }).join("")
-            : `<div style="padding:10px 12px;border-radius:8px;border:1px dashed var(--border-subtle);color:var(--text-dim);font-size:0.76rem;text-align:center;">
-                暂无开场白
-              </div>`
+          }
+        </div>
+      </div>
+    `;
+  } else {
+    const scopedPreviewCss = scopeProjectCss(customCssVal, "#advCssLivePreviewStage");
+    tabContentHtml = `
+      <!-- 1. 电脑与移动设备背景图 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header">
+          <div class="studio-section-title">聊天背景设置</div>
+          <span style="font-size:11.5px;color:var(--text-muted);">电脑横屏与手机竖屏自动切换适配</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(290px, 1fr));gap:12px;">
+          <div>
+            <label class="gc-field-label">背景图（电脑横屏 16:9）</label>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div class="studio-preview-box" style="width:64px;height:40px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;font-size:11px;color:var(--text-dim);">
+                ${bgUrl ? `<img src="${escapeHtml(bgUrl)}" alt="背景" style="width:100%;height:100%;object-fit:cover;cursor:pointer;" onclick="window.previewCgImage('${escapeJsAttr(bgUrl)}')" />` : "默认"}
+              </div>
+              <div class="ai-fused-input-group has-value" style="flex:1;min-width:0;">
+                <input type="text" id="advBgImageInput" class="ai-fused-input" value="${escapeHtml(bgUrl)}" placeholder="图片 URL 或上传" style="flex:1;min-width:0;" />
+                ${bgUrl ? `<button type="button" class="ai-fused-sub-btn" onclick="window.clearAdvancedBackground(false)">清除</button>` : ""}
+                <button type="button" class="ai-fused-sub-btn" onclick="window.pickAdvancedGalleryAsset('bg_image')">使用图库图片</button>
+                <button type="button" class="ai-fused-sub-btn" onclick="document.getElementById('advProjBgFileInput').click()">传图</button>
+              </div>
+              <input type="file" id="advProjBgFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectBackground(event, 'advanced')" />
+            </div>
+          </div>
+
+          <div>
+            <label class="gc-field-label">移动设备背景图（竖屏 9:16）</label>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div class="studio-preview-box" style="width:38px;height:46px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;font-size:11px;color:var(--text-dim);">
+                ${bgMobileUrl ? `<img src="${escapeHtml(bgMobileUrl)}" alt="手机背景" style="width:100%;height:100%;object-fit:cover;cursor:pointer;" onclick="window.previewCgImage('${escapeJsAttr(bgMobileUrl)}')" />` : "竖屏"}
+              </div>
+              <div class="ai-fused-input-group has-value" style="flex:1;min-width:0;">
+                <input type="text" id="advBgMobileInput" class="ai-fused-input" value="${escapeHtml(bgMobileUrl)}" placeholder="竖屏图片 URL 或上传" style="flex:1;min-width:0;" />
+                ${bgMobileUrl ? `<button type="button" class="ai-fused-sub-btn" onclick="window.clearAdvancedBackground(true)">清除</button>` : ""}
+                <button type="button" class="ai-fused-sub-btn" onclick="window.pickAdvancedGalleryAsset('bg_mobile')">使用图库图片</button>
+                <button type="button" class="ai-fused-sub-btn" onclick="document.getElementById('advProjBgMobileFileInput').click()">传图</button>
+              </div>
+              <input type="file" id="advProjBgMobileFileInput" accept="image/*" style="display:none;" onchange="window.handleUploadProjectMobileBackground(event, 'advanced')" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. ★ 内置 CSS 栏（官方风格模板 + 代码编辑 + 实时预览台） -->
+      <div class="studio-section-card" style="margin:0;border-color:rgba(212,166,90,0.36);">
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="studio-section-title" style="color:var(--lp-accent, #fcd34d);">内置 CSS</div>
+            <span id="advCssCharCounter" class="adv-char-counter">${customCssVal.length} 字</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.insertAdvCustomUiExample()">+ 插入 .custom-ui 样式骨架</button>
+            ${customCssVal.trim() ? `<button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.applyAdvCssPreset('')">清空 CSS</button>` : ""}
+          </div>
+        </div>
+
+        <div class="adv-css-preset-bar">
+          <span style="font-size:12px;font-weight:600;color:var(--text-muted);">官方模板：</span>
+          ${Object.entries(OFFICIAL_CSS_PRESETS).map(([pKey, pCfg]) => {
+            const isAct = customCssVal.trim() === pCfg.css.trim();
+            return `<button type="button" class="adv-css-preset-chip ${isAct ? "active" : ""}" onclick="window.applyAdvCssPreset('${escapeJsAttr(pKey)}')">${escapeHtml(pCfg.label)}</button>`;
+          }).join("")}
+        </div>
+
+        <textarea id="advCustomCssInput" rows="8" class="form-textarea adv-code-editor" placeholder="/* 在此编写作品专属内置 CSS，系统会自动将其安全隔离在聊天舞台内，随 PNG/JSON 游戏卡一并分享导出 */\n.custom-ui {\n  padding: 12px 16px;\n  border-radius: 10px;\n  border: 1px solid rgba(212, 166, 90, 0.45);\n}" oninput="window.refreshAdvCssLivePreview(this.value)">${escapeHtml(customCssVal)}</textarea>
+
+        <!-- 内置 CSS 实时渲染预览窗 -->
+        <div id="advCssLivePreviewStage" class="adv-css-preview-stage">
+          <style id="advCssPreviewScopedStyle">${scopedPreviewCss}</style>
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;display:flex;justify-content:space-between;">
+            <span>内置 CSS 实时效果预览（自动对应聊天区 <code>.message-row.assistant .bubble</code> 与自定义块 <code>.custom-ui</code>）</span>
+          </div>
+          <div class="message-item message-row assistant" style="margin:0;">
+            <div class="bubble markdown-body chat-answer-container" style="padding:14px 18px;max-width:100%;">
+              <details open>
+                <summary>SYSTEM TERMINAL</summary>
+                <p style="margin:0 0 8px 0;">推开尘封的橡木门，<em>微光</em>映亮了桌案上的卷宗，<code>HP: 100/100</code>。</p>
+                <blockquote>当前阶段：【潜入阶段】 · 任务进展正常</blockquote>
+              </details>
+              <div class="custom-ui">【自定义状态界面 .custom-ui】生命 100/100 · 理智 85/100</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. 正则脚本 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+          <div class="studio-section-title">正则脚本 <span class="adv-char-counter">(${rxList.length})</span></div>
+          <button type="button" class="btn btn-xs btn-primary" onclick="window.addAdvRegexRule()">+ 新增正则脚本</button>
+        </div>
+        <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:8px;">
+          可将 AI 输出内容中匹配正则表达式的文本自动替换为自定义文本或 HTML UI 卡片（勾选「仅渲染」时只美化前端显示，不污染历史上下文）。
+        </div>
+        <div id="advRegexList" style="display:flex;flex-direction:column;gap:8px;">
+          ${rxList.length === 0
+            ? `<div style="padding:12px;border:1px dashed var(--border-subtle);border-radius:8px;text-align:center;color:var(--text-dim);font-size:12px;">暂无正则替换规则</div>`
+            : rxList.map((rx, idx) => {
+                const pat = rx.pattern ?? rx.find_regex ?? rx.regex ?? "";
+                const rep = rx.replacement ?? rx.replace_str ?? rx.replace ?? "";
+                const sc = (rx.scope === 2 || rx.scope === "user") ? "user" : ((rx.scope === "both" || rx.scope === 3) ? "both" : "assistant");
+                const en = rx.enabled !== false;
+                const ro = rx.is_only_render !== false;
+                return `
+                  <div class="adv-rx-item" data-rx-id="${escapeHtml(rx.id || `rx_${idx + 1}`)}" style="padding:9px 11px;border-radius:8px;border:1px solid var(--border-subtle);background:rgba(255,255,255,0.025);display:flex;flex-direction:column;gap:6px;">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                      <label class="checkbox-label" style="font-size:12px;margin:0;">
+                        <input type="checkbox" class="adv-rx-enabled" ${en ? "checked" : ""} />
+                        <span>启用</span>
+                      </label>
+                      <input type="text" class="form-input adv-rx-name" value="${escapeHtml(rx.name || `规则 #${idx + 1}`)}" placeholder="规则名称" style="width:135px;padding:3px 8px;font-size:12px;" />
+                      <select class="form-select adv-rx-scope" style="width:auto;padding:2px 20px 2px 8px;height:26px;font-size:11.5px;">
+                        <option value="assistant" ${sc === "assistant" ? "selected" : ""}>仅 AI 输出</option>
+                        <option value="user" ${sc === "user" ? "selected" : ""}>仅玩家输入</option>
+                        <option value="both" ${sc === "both" ? "selected" : ""}>双向生效</option>
+                      </select>
+                      <label class="checkbox-label" style="font-size:11.5px;margin:0;" title="仅在前端渲染时替换（支持替换为 HTML + 内置 CSS 卡片），不改写数据库原文">
+                        <input type="checkbox" class="adv-rx-renderonly" ${ro ? "checked" : ""} />
+                        <span>仅渲染替换 (支持 HTML)</span>
+                      </label>
+                      <button type="button" class="btn btn-xs btn-danger" style="margin-left:auto;" onclick="window.removeAdvRegexRule(${idx})">删除</button>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                      <input type="text" class="form-input adv-rx-pattern" value="${escapeHtml(pat)}" placeholder="匹配正则表达式（如 /\\[状态:(.*?)\\]/g）" style="font-family:monospace;font-size:12px;" />
+                      <input type="text" class="form-input adv-rx-replacement" value="${escapeHtml(rep)}" placeholder="替换文本或 HTML（如 <div class='custom-ui'>$1</div>）" style="font-family:monospace;font-size:12px;" />
+                    </div>
+                  </div>
+                `;
+              }).join("")
           }
         </div>
       </div>
 
-      <!-- 2. 前置提示词 -->
+      <!-- 4. CG 图片触发 (0/20) -->
       <div class="studio-section-card" style="margin:0;">
-        <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
-          <div class="studio-section-title">前置提示词</div>
-          <div class="ai-fused-input-group">
-            <input type="text" id="advHint_prefix" class="ai-fused-input" style="width:155px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-            <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjPrefix', 'prefix', this, 'advHint_prefix')">润色</button>
-          </div>
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:8px;">
+          <div class="studio-section-title">CG 图片触发 <span class="adv-char-counter">（已设置特殊 CG 个数：${cgList.length} / 20）</span></div>
+          <button type="button" class="btn btn-xs btn-primary" onclick="window.addAdvCgEntry()">+ 新增特殊 CG</button>
         </div>
-        <textarea id="advProjPrefix" rows="3" class="form-textarea" placeholder="加在每条发言前">${escapeHtml(d.prefix || "")}</textarea>
+
+        <div class="adv-default-bar" style="margin-bottom:10px;">
+          <b style="color:var(--text-main);">CG 图片默认样式：</b>
+          <span>触发区域</span>
+          <select id="advCgDefSource" class="form-select" style="width:auto;padding:2px 20px 2px 8px;height:25px;font-size:11.5px;">
+            <option value="ai" ${cgDefs.trigger_source !== "both" ? "selected" : ""}>仅 AI 回复</option>
+            <option value="both" ${cgDefs.trigger_source === "both" ? "selected" : ""}>玩家 + AI</option>
+          </select>
+          <span>格式</span>
+          <select id="advCgDefMatch" class="form-select" style="width:auto;padding:2px 20px 2px 8px;height:25px;font-size:11.5px;">
+            <option value="OR" ${cgDefs.match_type !== "AND" ? "selected" : ""}>或 OR (任一命中)</option>
+            <option value="AND" ${cgDefs.match_type === "AND" ? "selected" : ""}>与 AND (全部命中)</option>
+          </select>
+          <span>区域映射</span>
+          <select id="advCgDefDisplay" class="form-select" style="width:auto;padding:2px 20px 2px 8px;height:25px;font-size:11.5px;">
+            <option value="chat" ${cgDefs.display_mode !== "background" ? "selected" : ""}>聊天消息插图</option>
+            <option value="background" ${cgDefs.display_mode === "background" ? "selected" : ""}>切换聊天背景图</option>
+          </select>
+        </div>
+
+        <div id="advCgList" style="display:flex;flex-direction:column;gap:8px;">
+          ${cgList.length === 0
+            ? `<div style="padding:12px;border:1px dashed var(--border-subtle);border-radius:8px;text-align:center;color:var(--text-dim);font-size:12px;">暂无特殊 CG（支持本地上传或使用图库图片，命中关键词自动弹出插画或切换背景）</div>`
+            : cgList.map((cg, idx) => {
+                const imgUrl = cg.image_url || cg.url || "";
+                const kStr = Array.isArray(cg.keys) ? cg.keys.join(", ") : String(cg.keys || "");
+                return `
+                  <div class="adv-cg-item gc-cg-card" data-cg-id="${escapeHtml(cg.id || `cg_${idx + 1}`)}" data-img-url="${escapeHtml(imgUrl)}">
+                    <div class="gc-cg-thumb" onclick="document.getElementById('advCgFile_${idx}').click()" title="点击上传本地 CG">
+                      <input type="file" id="advCgFile_${idx}" accept="image/*" style="display:none;" onchange="window.handleUploadAdvCgFile(event, ${idx})" />
+                      ${imgUrl ? `<img src="${escapeHtml(imgUrl)}" alt="CG" />` : `<span>+ 传图</span>`}
+                    </div>
+                    <div style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:6px;">
+                      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                        <input type="text" class="form-input adv-cg-name" style="width:125px;padding:4px 8px;font-size:12px;" value="${escapeHtml(cg.name || "")}" placeholder="CG 名称" />
+                        <input type="text" class="form-input adv-cg-keys" style="flex:1;min-width:140px;padding:4px 8px;font-size:12px;" value="${escapeHtml(kStr)}" placeholder="触发关键词（逗号分隔）" />
+                        <input type="text" class="form-input adv-cg-url" style="width:150px;padding:4px 8px;font-size:11.5px;" value="${escapeHtml(imgUrl)}" placeholder="图片 URL" />
+                        <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.pickAdvancedGalleryAsset('cg', ${idx})">图库</button>
+                        <button type="button" class="btn btn-xs btn-danger" onclick="window.removeAdvCgEntry(${idx})">✕</button>
+                      </div>
+                      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--text-muted);">
+                        <span>触发区域:</span>
+                        <select class="form-select adv-cg-source" style="width:auto;padding:2px 20px 2px 6px;height:24px;font-size:11.5px;">
+                          <option value="ai" ${cg.trigger_source !== "both" ? "selected" : ""}>仅 AI</option>
+                          <option value="both" ${cg.trigger_source === "both" ? "selected" : ""}>玩家+AI</option>
+                        </select>
+                        <span>格式:</span>
+                        <select class="form-select adv-cg-match" style="width:auto;padding:2px 20px 2px 6px;height:24px;font-size:11.5px;">
+                          <option value="OR" ${cg.match_type !== "AND" ? "selected" : ""}>或 OR</option>
+                          <option value="AND" ${cg.match_type === "AND" ? "selected" : ""}>与 AND</option>
+                        </select>
+                        <span>区域映射:</span>
+                        <select class="form-select adv-cg-display" style="width:auto;padding:2px 20px 2px 6px;height:24px;font-size:11.5px;">
+                          <option value="chat" ${cg.display_mode !== "background" ? "selected" : ""}>聊天插图</option>
+                          <option value="background" ${cg.display_mode === "background" ? "selected" : ""}>切换背景</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                `;
+              }).join("")
+          }
+        </div>
       </div>
 
-      <!-- 3. 核心设定 -->
-      <div class="studio-section-card" style="margin:0;">
-        <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
-          <div class="studio-section-title">核心设定</div>
-          <div class="ai-fused-input-group">
-            <input type="text" id="advHint_system_prompt" class="ai-fused-input" style="width:165px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-            <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjSystem', 'system_prompt', this, 'advHint_system_prompt')">润色</button>
+      <!-- 5. 预设对话开场白 & 快捷回复指令 -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(320px, 1fr));gap:12px;">
+        <div class="studio-section-card" style="margin:0;">
+          <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+            <div class="studio-section-title">预设对话开场白 <span class="adv-char-counter">(${(d.opening_greetings || []).length})</span></div>
+            <button type="button" class="btn btn-xs btn-primary" onclick="window.addAdvOpeningGreeting()">+ 新增开场白</button>
+          </div>
+          <div id="advOpeningGreetingsList" style="display:flex;flex-direction:column;gap:8px;">
+            ${Array.isArray(d.opening_greetings) && d.opening_greetings.length > 0
+              ? d.opening_greetings.map((og, idx) => {
+                  const titleVal = typeof og === "object" ? (og.title || "") : "";
+                  const contentVal = typeof og === "string" ? og : (og.content || og.text || "");
+                  const ogId = (typeof og === "object" && og.id) ? og.id : `og_${idx + 1}`;
+                  return `
+                    <div class="adv-opening-greeting-item" data-og-id="${escapeHtml(ogId)}" style="display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--border-subtle);background:rgba(128,128,128,0.05);">
+                      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <span style="font-size:11.5px;font-weight:700;color:var(--lp-accent,#fcd34d);">#${idx + 1}</span>
+                        <input type="text" class="form-input adv-og-title" value="${escapeHtml(titleVal)}" placeholder="分支标题" style="flex:1;min-width:100px;padding:3px 8px;font-size:12px;" />
+                        <div class="ai-fused-input-group">
+                          <input type="text" id="advHint_og_${idx}" class="ai-fused-input adv-og-hint" style="width:105px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" />
+                          <button type="button" class="ai-fused-btn" onclick="window.polishAdvOpeningGreeting(${idx}, this, 'advHint_og_${idx}')">润色</button>
+                        </div>
+                        <button type="button" class="btn btn-xs btn-danger" onclick="window.removeAdvOpeningGreeting(${idx})">✕</button>
+                      </div>
+                      <textarea rows="3" class="form-textarea adv-og-content" placeholder="开场白正文...">${escapeHtml(contentVal)}</textarea>
+                    </div>
+                  `;
+                }).join("")
+              : `<div style="padding:12px;border-radius:8px;border:1px dashed var(--border-subtle);color:var(--text-dim);font-size:12px;text-align:center;">暂无预设开场白</div>`
+            }
           </div>
         </div>
-        <textarea id="advProjSystem" rows="7" class="form-textarea" placeholder="世界观、规则、人物">${escapeHtml(d.system_prompt || "")}</textarea>
-      </div>
 
-      <!-- 4. 后置提示词 -->
-      <div class="studio-section-card" style="margin:0;">
-        <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
-          <div class="studio-section-title">后置提示词</div>
-          <div class="ai-fused-input-group">
-            <input type="text" id="advHint_suffix" class="ai-fused-input" style="width:155px;" placeholder="想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
-            <button type="button" class="ai-fused-btn" onclick="window.polishAdvancedField('advProjSuffix', 'suffix', this, 'advHint_suffix')">润色</button>
+        <div class="studio-section-card" style="margin:0;">
+          <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+            <div class="studio-section-title">快捷回复指令 <span class="adv-char-counter">(${qrList.length} / 10)</span></div>
+            <button type="button" class="btn btn-xs btn-primary" onclick="window.addAdvQuickReply()">+ 新增快捷指令</button>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:8px;">设置快捷按钮或 <code>/指令</code>，玩家点击按钮或输入指令即可快速发送预设内容给 AI。</div>
+          <div id="advQuickRepliesList" style="display:flex;flex-direction:column;gap:8px;">
+            ${qrList.length === 0
+              ? `<div style="padding:12px;border-radius:8px;border:1px dashed var(--border-subtle);color:var(--text-dim);font-size:12px;text-align:center;">最多可添加 0/10 个快捷命令</div>`
+              : qrList.map((qr, idx) => `
+                  <div class="adv-qr-item" data-qr-id="${escapeHtml(qr.id || `qr_${idx + 1}`)}" style="display:flex;flex-direction:column;gap:5px;padding:8px 10px;border-radius:8px;border:1px solid var(--border-subtle);background:rgba(128,128,128,0.05);">
+                    <div style="display:flex;gap:6px;align-items:center;">
+                      <input type="text" class="form-input adv-qr-label" value="${escapeHtml(qr.label || "")}" placeholder="按钮显示名 (如: 观察四周)" style="flex:1;padding:3px 8px;font-size:12px;" />
+                      <input type="text" class="form-input adv-qr-cmd" value="${escapeHtml(qr.command || "")}" placeholder="/指令词 (选填)" style="width:110px;padding:3px 8px;font-size:12px;font-family:monospace;" />
+                      <button type="button" class="btn btn-xs btn-danger" onclick="window.removeAdvQuickReply(${idx})">✕</button>
+                    </div>
+                    <input type="text" class="form-input adv-qr-content" value="${escapeHtml(qr.content || "")}" placeholder="发送给 AI 的预设内容（如：我仔细观察周围环境的异常细节与可疑人物）" style="padding:4px 8px;font-size:12px;" />
+                  </div>
+                `).join("")
+            }
           </div>
         </div>
-        <textarea id="advProjSuffix" rows="3" class="form-textarea" placeholder="加在每条发言后">${escapeHtml(d.suffix || "")}</textarea>
       </div>
 
-      <!-- 5. 采样参数 -->
+      <!-- 6. 默认记忆长度与采样参数 -->
       <div class="studio-section-card" style="margin:0;">
         <div class="studio-section-header">
           <div class="studio-section-title" style="display:flex;align-items:center;gap:6px;">
-            <span>采样参数</span>
-            ${hasModelOverride ? `<span class="wb-badge" style="color:var(--tc-fcd34d, #fcd34d);border-color:var(--tc-rgba-245-158-11-0-45, rgba(245,158,11,0.45));background:var(--tc-rgba-245-158-11-0-12, rgba(245,158,11,0.12));font-size:11px;">已被模型参数覆盖</span>` : ""}
+            <span>默认记忆长度与采样参数</span>
+            ${hasModelOverride ? `<span class="wb-badge" style="color:var(--tc-fcd34d, #fcd34d);font-size:11px;">已被模型独立参数覆盖</span>` : ""}
           </div>
           <label class="checkbox-label" style="font-size:0.78rem;font-weight:600;color:${useGlobal ? "var(--tc-34d399, #34d399)" : "var(--text-main)"};${hasModelOverride ? "opacity:0.45;pointer-events:none;" : ""}">
             <input type="checkbox" id="advUseGlobalParams" ${useGlobal ? "checked" : ""} ${hasModelOverride ? "disabled" : ""} onchange="window.toggleAdvUseGlobalParams(this.checked)" />
-            <span>跟随全局</span>
+            <span>跟随全局参数</span>
           </label>
         </div>
 
-        ${hasModelOverride ? `
-          <div class="model-param-override-banner" style="margin-bottom:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--tc-rgba-245-158-11-0-42, rgba(245,158,11,0.42));background:var(--tc-rgba-245-158-11-0-09, rgba(245,158,11,0.09));display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-            <div style="font-size:12px;color:var(--tc-fcd34d, #fcd34d);line-height:1.5;flex:1;min-width:220px;">
-              <div><b>独立参数：${escapeHtml(activeModel)}</b></div>
-              
+        <div class="numeric-params-grid" style="${isParamsLocked ? "opacity:0.45;pointer-events:none;filter:grayscale(0.65);user-select:none;" : ""}">
+          <div class="param-slider-row context-integrated-card" style="grid-column: 1 / -1;">
+            <div class="param-slider-header" style="gap:8px;margin-bottom:6px;">
+              <span>默认记忆模式</span>
+              <select id="advContextMode" ${disabledAttr} class="form-select" style="width:auto;padding:2px 8px;font-size:12px;height:26px;" onchange="window.updateAdvContextMode(this.value)">
+                <option value="turns" ${cp.context_mode !== "tokens" ? "selected" : ""}>按对话轮数</option>
+                <option value="tokens" ${cp.context_mode === "tokens" ? "selected" : ""}>按 Token 上限</option>
+              </select>
             </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0;">
-              <button type="button" class="btn btn-xs btn-primary" onclick="window.jumpToActiveModelParams('${escapeJsAttr(activeModel)}')">修改</button>
-              <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.disableActiveModelParamsOverride('${escapeJsAttr(activeModel)}')">关闭</button>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:12px;align-items:start;">
+              <div style="${cp.context_mode === "tokens" ? "display:none;" : ""}">
+                <div class="param-slider-header">
+                  <span style="font-size:12px;color:var(--text-muted);">默认记忆轮数</span>
+                  <input type="number" ${disabledAttr} class="param-num-input" id="advNum_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateAdvCompletionParam('context', Number(this.value))" />
+                </div>
+                <input type="range" ${disabledAttr} id="advRange_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateAdvCompletionParam('context', Number(this.value))" />
+                <small class="param-item-hint">保留最近 <b id="advContextMsgsCalc">${ctxTurns * 2}</b> 条消息</small>
+              </div>
+              <div>
+                <div class="param-slider-header">
+                  <span style="font-size:12px;color:var(--text-muted);">上下文上限 (k)</span>
+                  <input type="number" ${disabledAttr} class="param-num-input" id="advNum_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateAdvCompletionParam('max_context_k', Number(this.value))" />
+                </div>
+                <input type="range" ${disabledAttr} id="advRange_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateAdvCompletionParam('max_context_k', Number(this.value))" />
+                <small class="param-item-hint">单位 k</small>
+              </div>
             </div>
           </div>
-        ` : ""}
 
-        <div class="numeric-params-grid" style="${isParamsLocked ? "opacity:0.45;pointer-events:none;filter:grayscale(0.65);user-select:none;" : ""}">
           <div class="param-slider-row">
             <div class="param-slider-header">
               <span>温度</span>
               <input type="number" ${disabledAttr} class="param-num-input" id="advNum_temperature" min="0" max="2.0" step="0.05" value="${Number(cp.temperature ?? 0.68).toFixed(2)}" oninput="window.updateAdvCompletionParam('temperature', Number(this.value))" />
             </div>
             <input type="range" ${disabledAttr} id="advRange_temperature" min="0" max="2.0" step="0.05" value="${cp.temperature ?? 0.68}" oninput="window.updateAdvCompletionParam('temperature', Number(this.value))" />
-          </div>
-
-          <div class="param-slider-row">
-            <div class="param-slider-header">
-              <span>重复惩罚</span>
-              <input type="number" ${disabledAttr} class="param-num-input" id="advNum_repetition_penalty" min="1.0" max="1.5" step="0.01" value="${Number(cp.repetition_penalty ?? 1.05).toFixed(2)}" oninput="window.updateAdvCompletionParam('repetition_penalty', Number(this.value))" />
-            </div>
-            <input type="range" ${disabledAttr} id="advRange_repetition_penalty" min="1.0" max="1.5" step="0.01" value="${cp.repetition_penalty ?? 1.05}" oninput="window.updateAdvCompletionParam('repetition_penalty', Number(this.value))" />
-          </div>
-
-          <div class="param-slider-row">
-            <div class="param-slider-header">
-              <span>频率惩罚</span>
-              <input type="number" ${disabledAttr} class="param-num-input" id="advNum_frequency_penalty" min="-2.0" max="2.0" step="0.05" value="${Number(cp.frequency_penalty ?? 0.05).toFixed(2)}" oninput="window.updateAdvCompletionParam('frequency_penalty', Number(this.value))" />
-            </div>
-            <input type="range" ${disabledAttr} id="advRange_frequency_penalty" min="-2.0" max="2.0" step="0.05" value="${cp.frequency_penalty ?? 0.05}" oninput="window.updateAdvCompletionParam('frequency_penalty', Number(this.value))" />
-          </div>
-
-          <div class="param-slider-row">
-            <div class="param-slider-header">
-              <span>存在惩罚</span>
-              <input type="number" ${disabledAttr} class="param-num-input" id="advNum_presence_penalty" min="-2.0" max="2.0" step="0.05" value="${Number(cp.presence_penalty ?? 0.20).toFixed(2)}" oninput="window.updateAdvCompletionParam('presence_penalty', Number(this.value))" />
-            </div>
-            <input type="range" ${disabledAttr} id="advRange_presence_penalty" min="-2.0" max="2.0" step="0.05" value="${cp.presence_penalty ?? 0.20}" oninput="window.updateAdvCompletionParam('presence_penalty', Number(this.value))" />
           </div>
 
           <div class="param-slider-row">
@@ -4348,62 +6251,10 @@ function renderAdvancedProjectEditor() {
 
           <div class="param-slider-row">
             <div class="param-slider-header">
-              <span>Top-K</span>
-              <input type="number" ${disabledAttr} class="param-num-input" id="advNum_top_k" min="0" max="100" step="1" value="${cp.top_k ?? 40}" oninput="window.updateAdvCompletionParam('top_k', Number(this.value))" />
-            </div>
-            <input type="range" ${disabledAttr} id="advRange_top_k" min="0" max="100" step="1" value="${cp.top_k ?? 40}" oninput="window.updateAdvCompletionParam('top_k', Number(this.value))" />
-          </div>
-
-          <div class="param-slider-row">
-            <div class="param-slider-header">
-              <span>Min-P</span>
-              <input type="number" ${disabledAttr} class="param-num-input" id="advNum_min_p" min="0.0" max="0.5" step="0.01" value="${Number(cp.min_p ?? 0.06).toFixed(2)}" oninput="window.updateAdvCompletionParam('min_p', Number(this.value))" />
-            </div>
-            <input type="range" ${disabledAttr} id="advRange_min_p" min="0.0" max="0.5" step="0.01" value="${cp.min_p ?? 0.06}" oninput="window.updateAdvCompletionParam('min_p', Number(this.value))" />
-          </div>
-
-          <div class="param-slider-row">
-            <div class="param-slider-header">
               <span>最大输出</span>
               <input type="number" ${disabledAttr} class="param-num-input" id="advNum_max_tokens" min="256" max="65536" step="256" value="${cp.max_tokens ?? 8192}" oninput="window.updateAdvCompletionParam('max_tokens', Number(this.value))" />
             </div>
             <input type="range" ${disabledAttr} id="advRange_max_tokens" min="256" max="65536" step="256" value="${cp.max_tokens ?? 8192}" oninput="window.updateAdvCompletionParam('max_tokens', Number(this.value))" />
-            <small class="param-item-hint">最大 64k (65536)</small>
-          </div>
-
-          <div class="param-slider-row">
-            <div class="param-slider-header" style="gap:6px;">
-              <span>上下文模式</span>
-              <select id="advContextMode" ${disabledAttr} class="form-select" style="width:auto;padding:2px 8px;font-size:12px;height:26px;" onchange="window.updateAdvContextMode(this.value)">
-                <option value="turns" ${cp.context_mode !== "tokens" ? "selected" : ""}>按轮数</option>
-                <option value="tokens" ${cp.context_mode === "tokens" ? "selected" : ""}>按 Token</option>
-              </select>
-            </div>
-            <div style="${cp.context_mode === "tokens" ? "opacity:0.45;pointer-events:none;" : ""}">
-              <div class="param-slider-header" style="margin-top:4px;">
-                <span style="font-size:12px;color:var(--text-muted);">上下文轮数</span>
-                <input type="number" ${disabledAttr} class="param-num-input" id="advNum_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateAdvCompletionParam('context', Number(this.value))" />
-              </div>
-              <input type="range" ${disabledAttr} id="advRange_context" min="2" max="200" step="1" value="${ctxTurns}" oninput="window.updateAdvCompletionParam('context', Number(this.value))" />
-              <small class="param-item-hint">保留最近 <b id="advContextMsgsCalc">${ctxTurns * 2}</b> 条消息</small>
-            </div>
-          </div>
-
-          <div class="param-slider-row" style="${cp.context_mode === "tokens" ? "border-color:var(--tc-rgba-99-102-241-0-55, rgba(99,102,241,0.55));background:var(--tc-rgba-99-102-241-0-08, rgba(99,102,241,0.08));" : ""}">
-            <div class="param-slider-header">
-              <span>上下文上限 (k)</span>
-              <input type="number" ${disabledAttr} class="param-num-input" id="advNum_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateAdvCompletionParam('max_context_k', Number(this.value))" />
-            </div>
-            <input type="range" ${disabledAttr} id="advRange_max_context_k" min="4" max="512" step="4" value="${cp.max_context_k ?? 96}" oninput="window.updateAdvCompletionParam('max_context_k', Number(this.value))" />
-            <small class="param-item-hint">单位 k</small>
-          </div>
-
-          <div class="param-slider-row">
-            <div class="param-slider-header">
-              <span>压缩保留</span>
-              <input type="number" ${disabledAttr} class="param-num-input" id="advNum_keep_recent_messages" min="2" max="30" step="2" value="${cp.keep_recent_messages ?? 6}" oninput="window.updateAdvCompletionParam('keep_recent_messages', Number(this.value))" />
-            </div>
-            <input type="range" ${disabledAttr} id="advRange_keep_recent_messages" min="2" max="30" step="2" value="${cp.keep_recent_messages ?? 6}" oninput="window.updateAdvCompletionParam('keep_recent_messages', Number(this.value))" />
           </div>
 
           <div class="param-slider-row">
@@ -4418,19 +6269,68 @@ function renderAdvancedProjectEditor() {
         <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
           <label class="checkbox-label" style="font-size:0.78rem;">
             <input type="checkbox" id="advAutoSummarize" ${d.auto_summarize !== false ? "checked" : ""} />
-            <span>超限自动压缩</span>
+            <span>超限自动压缩前情记忆</span>
           </label>
         </div>
       </div>
+    `;
+  }
 
-      <!-- 底部确认栏 -->
-      <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;">
-        <button type="button" class="btn btn-sm btn-secondary" onclick="window.backToExploreCardList()">
-          返回
-        </button>
-        <button type="button" class="btn btn-sm btn-primary" style="padding:8px 20px;font-weight:700;" onclick="window.submitAdvancedNewProject()">
-          创建
-        </button>
+  body.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <!-- 顶部导航 + 三栏切换 (基础设置 / 世界书设置 / 其他设置) + AI 润色与导出栏 -->
+      <div class="studio-section-card" style="margin:0;padding:10px 14px;background:linear-gradient(135deg,rgba(212,166,90,0.11),rgba(255,255,255,0.02));border-color:rgba(212,166,90,0.32);">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-xs btn-secondary" onclick="window.backToExploreCardList()">← 游戏卡库</button>
+            <span class="proj-tier-tag tier-advanced" style="padding:3px 9px;font-size:11px;">高级游戏卡</span>
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="document.getElementById('globalGameCardImportInput')?.click()" title="导入酒馆或本工作台 .png/.json 游戏卡">导入游戏卡</button>
+          </div>
+
+          <div class="adv-studio-tabs" role="tablist">
+            <button type="button" class="adv-studio-tab-btn ${currentAdvancedCreatorTab === "basic" ? "active" : ""}" onclick="window.switchAdvancedCreatorTab('basic')">
+              <span>基础设置</span>
+            </button>
+            <button type="button" class="adv-studio-tab-btn ${currentAdvancedCreatorTab === "worldbook" ? "active" : ""}" onclick="window.switchAdvancedCreatorTab('worldbook')">
+              <span>世界书设置</span>
+              ${wbList.length > 0 ? `<span class="adv-tab-badge">${wbList.length}</span>` : ""}
+            </button>
+            <button type="button" class="adv-studio-tab-btn ${currentAdvancedCreatorTab === "other" ? "active" : ""}" onclick="window.switchAdvancedCreatorTab('other')">
+              <span>其他设置 · CSS</span>
+              ${otherExtCount > 0 ? `<span class="adv-tab-badge">${otherExtCount}</span>` : ""}
+            </button>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <select id="advAiModelSelect" class="form-select ai-assist-model-select" style="width:auto;max-width:170px;padding:3px 22px 3px 8px;font-size:12px;height:28px;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)" title="AI 润色模型"></select>
+            <div class="ai-fused-input-group">
+              <input type="text" id="advGlobalPolishInstruction" class="ai-fused-input" style="width:125px;" placeholder="润色想法" oninput="this.parentElement.classList.toggle('has-value', !!this.value.trim())" onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click();}" />
+              <button type="button" id="btnPolishAllAdv" class="ai-fused-btn" onclick="window.polishAllAdvancedFields(this)">一键润色</button>
+            </div>
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.exportDraftGameCard('advanced', 'png')" title="导出 PNG 海报游戏卡（兼容酒馆）">导出 PNG</button>
+            <button type="button" class="btn btn-xs btn-outline-secondary" onclick="window.exportDraftGameCard('advanced', 'json')" title="导出 JSON 游戏卡">JSON</button>
+            <button type="button" class="btn btn-sm btn-primary" style="font-weight:700;" onclick="window.submitAdvancedNewProject()">
+              ${isEditingExisting ? "保存游戏卡" : "创建游戏卡"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      ${tabContentHtml}
+
+      <!-- 底部操作栏 -->
+      <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;flex-wrap:wrap;gap:8px;">
+        <div style="display:flex;gap:6px;">
+          <button type="button" class="btn btn-sm btn-secondary" onclick="window.backToExploreCardList()">返回卡库</button>
+          ${currentAdvancedCreatorTab !== "basic" ? `<button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.switchAdvancedCreatorTab('${currentAdvancedCreatorTab === "other" ? "worldbook" : "basic"}')">← 上一栏</button>` : ""}
+          ${currentAdvancedCreatorTab !== "other" ? `<button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.switchAdvancedCreatorTab('${currentAdvancedCreatorTab === "basic" ? "worldbook" : "other"}')">下一栏 →</button>` : ""}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.exportDraftGameCard('advanced', 'png')">导出 PNG 游戏卡</button>
+          <button type="button" class="btn btn-sm btn-primary" style="padding:8px 20px;font-weight:700;" onclick="window.submitAdvancedNewProject()">
+            ${isEditingExisting ? "保存并游玩" : "创建并游玩"}
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -4457,7 +6357,7 @@ function renderAdvancedProjectEditor() {
 
 window.backToExploreCardList = function () {
   advancedDraftProject = null;
-  renderExploreModalContent();
+  return window.openExploreModal();
 };
 
 window.polishAdvancedField = async function (inputId, fieldType, btnEl, hintInputId = "") {
@@ -4599,35 +6499,74 @@ window.polishAllAdvancedFields = async function (btnEl) {
 window.submitAdvancedNewProject = async function () {
   syncAdvancedDraftFromDom();
   if (!advancedDraftProject) return;
+  if (advancedDraftProject.status_panel_enabled !== false) {
+    ensureActiveStatusModulesOnEnable(advancedDraftProject);
+  }
   const d = JSON.parse(JSON.stringify(advancedDraftProject));
   delete d._sourceName;
+  d.card_tier = "advanced";
+  d.simple_mode = false;
+  if (["极速跑团", "简单跑团"].includes(String(d.category || "").trim())) {
+    d.category = "";
+  }
+  const isUpdatingExisting = Boolean(d.id && !["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(d.id));
 
   try {
-    const res = await fetch("/api/projects/fork", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project: d,
-        keep_exact_name: true
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "创建失败");
+    let savedProj = null;
+    let newChatId = null;
+    if (isUpdatingExisting) {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(d)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "保存失败");
+      savedProj = data.project;
+    } else {
+      const res = await fetch("/api/projects/fork", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: d,
+          keep_exact_name: true
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "创建失败");
+      savedProj = data.project;
+      newChatId = data.chat_id || null;
+    }
 
     const modal = document.getElementById("exploreModal");
     if (modal) modal.style.display = "none";
 
-    currentProjectId = data.project.id;
+    window._welcomeModeStepSelected = true;
+    currentProjectId = savedProj.id;
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active_project_id: currentProjectId })
+    });
     await loadProjects();
-    currentChatId = data.chat_id || null;
-    await loadChats();
-    if (currentChatId) {
-      await switchChat(currentChatId);
+    if (newChatId) {
+      currentChatId = newChatId;
+      await loadChats();
+      await switchChat(newChatId);
+    } else {
+      await loadChats();
     }
     applyProjectAppearance(getActiveProjectObj());
-    showToast(`已创建：${data.project.name}`);
+    if (typeof window.renderWelcomeBox === "function") {
+      window.renderWelcomeBox();
+    }
+    const pane = document.getElementById("studioWorkbenchPane");
+    if (pane && pane.style.display !== "none") {
+      renderStudioWorkbench();
+    }
+    showToast(isUpdatingExisting ? `已保存游戏卡：${savedProj.name}` : `已创建游戏卡：${savedProj.name}`);
   } catch (err) {
-    showToast("创建失败: " + err.message);
+    showToast((isUpdatingExisting ? "保存失败: " : "创建失败: ") + err.message);
   }
 };
 
@@ -4862,3 +6801,1119 @@ window.addEventListener("DOMContentLoaded", () => {
   setTimeout(setupEnterpriseHooks, 150);
   checkInitialConfigurationRoute();
 });
+
+// =========================================================================
+// 7. 简易创作向导 & 统一可分享游戏卡（Easy-TRPG <-> SillyTavern 酒馆双向导入/导出）
+// =========================================================================
+let guidedCardDraft = null;
+const GUIDED_QUICK_TAGS = ["跑团", "奇幻冒险", "现代战术", "克苏鲁悬疑", "武侠仙侠", "赛博科幻", "末日求生", "日常群像"];
+
+function createBlankGuidedDraft(defaultName = "新企划 #1") {
+  return {
+    id: "",
+    step: 1,
+    name: defaultName,
+    icon: "",
+    bg_image: "",
+    bg_mobile: "",
+    tags: [],
+    description: "",
+    set_initial_as_greeting: true,
+    guided_meta: {
+      idea_prompt: "",
+      protagonist_name: "",
+      protagonist_desc: "",
+      protagonist_goal: "",
+      world_name: "",
+      world_era: "",
+      world_conflict: "",
+      world_tone: "",
+      main_plot: "",
+      initial_state: "",
+      play_rules: "",
+      status_preset: "none",
+      npcs: []
+    },
+    cg_book: [],
+    extra_raw_prompt: "",
+    prefix: "",
+    suffix: "",
+    world_book: [],
+    regex_scripts: [],
+    existing_ui_modules: []
+  };
+}
+
+function buildGuidedDraftFromProject(proj) {
+  const p = normalizeProjectClient(JSON.parse(JSON.stringify(proj || {})));
+  const gm = (p.guided_meta && typeof p.guided_meta === "object") ? p.guided_meta : {};
+  const hasGuidedFields = Boolean(
+    gm.protagonist_name || gm.protagonist_desc || gm.world_name || gm.world_era ||
+    gm.world_conflict || gm.main_plot || gm.initial_state || gm.play_rules ||
+    (Array.isArray(gm.npcs) && gm.npcs.length > 0)
+  );
+  const og0 = Array.isArray(p.opening_greetings) && p.opening_greetings[0]
+    ? (typeof p.opening_greetings[0] === "string" ? p.opening_greetings[0] : (p.opening_greetings[0].content || ""))
+    : (p.opening_statement || "");
+
+  let detectedPreset = gm.status_preset || (p.status_panel_enabled ? "keep" : "none");
+  return {
+    id: p.id && !["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(p.id) ? p.id : "",
+    step: 1,
+    name: p.name || "未命名游戏卡",
+    icon: p.icon || p.avatar || "",
+    bg_image: p.appearance?.bg_image || p.bg_image || "",
+    bg_mobile: p.appearance?.bg_mobile || "",
+    tags: Array.isArray(p.tags) ? [...p.tags] : [],
+    description: p.description || "",
+    set_initial_as_greeting: Boolean(og0) || gm.set_initial_as_greeting !== false,
+    guided_meta: {
+      idea_prompt: gm.idea_prompt || "",
+      protagonist_name: gm.protagonist_name || "",
+      protagonist_desc: gm.protagonist_desc || "",
+      protagonist_goal: gm.protagonist_goal || "",
+      world_name: gm.world_name || "",
+      world_era: gm.world_era || "",
+      world_conflict: gm.world_conflict || "",
+      world_tone: gm.world_tone || "",
+      main_plot: gm.main_plot || "",
+      initial_state: gm.initial_state || og0 || "",
+      play_rules: gm.play_rules || (!hasGuidedFields ? (p.system_prompt || "") : ""),
+      status_preset: detectedPreset,
+      npcs: Array.isArray(gm.npcs) ? gm.npcs.map((n) => ({ ...n })) : []
+    },
+    detailed_description: p.detailed_description || "",
+    custom_css: p.custom_css || p.appearance?.custom_css || "",
+    quick_replies: Array.isArray(p.quick_replies) ? JSON.parse(JSON.stringify(p.quick_replies)) : [],
+    worldbook_defaults: p.worldbook_defaults ? { ...p.worldbook_defaults } : undefined,
+    cg_defaults: p.cg_defaults ? { ...p.cg_defaults } : undefined,
+    cg_book: Array.isArray(p.cg_book) ? JSON.parse(JSON.stringify(p.cg_book)) : [],
+    extra_raw_prompt: gm.extra_raw_prompt || "",
+    prefix: p.prefix || "",
+    suffix: p.suffix || "",
+    world_book: Array.isArray(p.world_book) ? JSON.parse(JSON.stringify(p.world_book)) : [],
+    regex_scripts: Array.isArray(p.regex_scripts) ? JSON.parse(JSON.stringify(p.regex_scripts)) : [],
+    existing_ui_modules: Array.isArray(p.ui_modules) ? JSON.parse(JSON.stringify(p.ui_modules)) : []
+  };
+}
+
+function syncGuidedDraftFromDom() {
+  if (!guidedCardDraft) return;
+  const d = guidedCardDraft;
+  const gm = d.guided_meta;
+  const valIfPresent = (id) => {
+    const el = document.getElementById(id);
+    return el ? el.value : undefined;
+  };
+
+  if (valIfPresent("gcNameInput") !== undefined) d.name = valIfPresent("gcNameInput").trim() || "未命名游戏卡";
+  if (valIfPresent("gcTagsInput") !== undefined) {
+    d.tags = valIfPresent("gcTagsInput").split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+  }
+  if (valIfPresent("gcDescInput") !== undefined) d.description = valIfPresent("gcDescInput").trim();
+  if (valIfPresent("gcIdeaInput") !== undefined) gm.idea_prompt = valIfPresent("gcIdeaInput").trim();
+  if (valIfPresent("gcProtName") !== undefined) gm.protagonist_name = valIfPresent("gcProtName").trim();
+  if (valIfPresent("gcProtDesc") !== undefined) gm.protagonist_desc = valIfPresent("gcProtDesc").trim();
+  if (valIfPresent("gcProtGoal") !== undefined) gm.protagonist_goal = valIfPresent("gcProtGoal").trim();
+  if (valIfPresent("gcWorldName") !== undefined) gm.world_name = valIfPresent("gcWorldName").trim();
+  if (valIfPresent("gcWorldTone") !== undefined) gm.world_tone = valIfPresent("gcWorldTone").trim();
+  if (valIfPresent("gcWorldEra") !== undefined) gm.world_era = valIfPresent("gcWorldEra").trim();
+  if (valIfPresent("gcWorldConflict") !== undefined) gm.world_conflict = valIfPresent("gcWorldConflict").trim();
+  if (valIfPresent("gcMainPlot") !== undefined) gm.main_plot = valIfPresent("gcMainPlot").trim();
+  if (valIfPresent("gcInitialState") !== undefined) gm.initial_state = valIfPresent("gcInitialState").trim();
+  if (valIfPresent("gcPlayRules") !== undefined) gm.play_rules = valIfPresent("gcPlayRules").trim();
+
+  const greetChk = document.getElementById("gcSetInitialGreeting");
+  if (greetChk) d.set_initial_as_greeting = !!greetChk.checked;
+
+  const npcCards = document.querySelectorAll("#gcNpcList .gc-npc-card");
+  if (npcCards.length > 0 || document.getElementById("gcNpcList")) {
+    gm.npcs = Array.from(npcCards).map((card) => ({
+      name: (card.querySelector(".gc-npc-name")?.value || "").trim(),
+      role: (card.querySelector(".gc-npc-role")?.value || "").trim(),
+      desc: (card.querySelector(".gc-npc-desc")?.value || "").trim(),
+      attitude: (card.querySelector(".gc-npc-attitude")?.value || "").trim()
+    }));
+  }
+
+  const cgCards = document.querySelectorAll("#gcCgList .gc-cg-card");
+  if (cgCards.length > 0 || document.getElementById("gcCgList")) {
+    d.cg_book = Array.from(cgCards).map((card, idx) => {
+      const prevCg = d.cg_book[idx] || {};
+      const rawKeys = (card.querySelector(".gc-cg-keys")?.value || "").trim();
+      return {
+        ...prevCg,
+        id: prevCg.id || `cg_${Date.now().toString(36)}_${idx}`,
+        name: (card.querySelector(".gc-cg-name")?.value || "").trim() || `特殊CG #${idx + 1}`,
+        image_url: card.dataset.imgUrl || prevCg.image_url || "",
+        keys: rawKeys.split(/[,，;；]+/).map((s) => s.trim()).filter(Boolean),
+        match_type: card.querySelector(".gc-cg-match")?.value || "OR",
+        trigger_source: card.querySelector(".gc-cg-source")?.value || "ai",
+        display_mode: card.querySelector(".gc-cg-display")?.value || "chat",
+        enabled: true
+      };
+    });
+  }
+}
+
+function buildPresetUiModules(presetKey, existingMods = []) {
+  if (presetKey === "keep" && Array.isArray(existingMods) && existingMods.length > 0) {
+    return { enabled: true, modules: JSON.parse(JSON.stringify(existingMods)) };
+  }
+  if (presetKey === "standard") {
+    return {
+      enabled: true,
+      modules: DEFAULT_UNIVERSAL_UI_MODULES.map((m) => ({ ...m, enabled: true }))
+    };
+  }
+  if (presetKey === "tactical") {
+    const base = DEFAULT_UNIVERSAL_UI_MODULES.map((m) => ({ ...m, enabled: true }));
+    const bodyMod = {
+      id: "mod_body_tac",
+      key: "身体与负伤",
+      type: "equipment_slots",
+      enabled: true,
+      fields: "头部: 完好\n胸部: 完好\n腹部: 完好\n四肢: 灵活\n精神/体力: 充沛",
+      desc: "每回合根据交战、受创或环境消耗实时更新身体各部位负伤、防护与行动能力变化。",
+      v: 2
+    };
+    base.splice(2, 0, bodyMod);
+    return { enabled: true, modules: base };
+  }
+  if (presetKey === "investigative") {
+    const storyM = STANDARD_UI_MODULES.find((m) => m.id === "mod_story");
+    const statsM = {
+      id: "mod_stats",
+      key: "调查员状态",
+      type: "progress_stats",
+      enabled: true,
+      fields: "生命: 100/100\n理智(SAN): 80/100\n精力: 100/100\n当前处境: 保持警惕",
+      desc: "实时追踪主角的生命、理智(SAN值)损耗、精力与现场处境。",
+      v: 2
+    };
+    const infoM = STANDARD_UI_MODULES.find((m) => m.id === "mod_info");
+    const invM = STANDARD_UI_MODULES.find((m) => m.id === "mod_inv");
+    const npcM = STANDARD_UI_MODULES.find((m) => m.id === "mod_npc");
+    const choicesM = STANDARD_UI_MODULES.find((m) => m.id === "mod_choices");
+    return {
+      enabled: true,
+      modules: [storyM, statsM, infoM, invM, npcM, choicesM].filter(Boolean).map((m) => ({ ...m, enabled: true }))
+    };
+  }
+  return { enabled: false, modules: [] };
+}
+
+function compileGuidedDraftToProject(draft) {
+  const d = draft || createBlankGuidedDraft();
+  const gm = d.guided_meta || {};
+  const sections = [];
+
+  const worldLines = [];
+  if (gm.world_name) worldLines.push(`- **世界/舞台名称**：${gm.world_name}`);
+  if (gm.world_era) worldLines.push(`- **时代背景与体系**：${gm.world_era}`);
+  if (gm.world_conflict) worldLines.push(`- **核心冲突与暗流**：${gm.world_conflict}`);
+  if (gm.world_tone) worldLines.push(`- **整体基调与文风**：${gm.world_tone}`);
+  if (worldLines.length > 0) {
+    sections.push(`## 世界观设定\n${worldLines.join("\n")}`);
+  }
+
+  const protLines = [];
+  if (gm.protagonist_name) protLines.push(`- **主人公（玩家）称呼/身份**：${gm.protagonist_name}`);
+  if (gm.protagonist_desc) protLines.push(`- **背景与能力特征**：${gm.protagonist_desc}`);
+  if (gm.protagonist_goal) protLines.push(`- **核心动机与目标**：${gm.protagonist_goal}`);
+  if (protLines.length > 0) {
+    sections.push(`## 主人公（玩家）设定\n${protLines.join("\n")}`);
+  }
+
+  const validNpcs = (Array.isArray(gm.npcs) ? gm.npcs : []).filter(
+    (n) => n && (n.name || n.role || n.desc || n.attitude)
+  );
+  if (validNpcs.length > 0) {
+    const npcBlocks = validNpcs.map((n, idx) => {
+      const parts = [];
+      parts.push(`### ${idx + 1}. ${n.name || "未命名角色"}${n.role ? `（${n.role}）` : ""}`);
+      if (n.desc) parts.push(`- **外貌性格与能力**：${n.desc}`);
+      if (n.attitude) parts.push(`- **对主角态度与动机**：${n.attitude}`);
+      return parts.join("\n");
+    });
+    sections.push(`## 登场角色设定\n${npcBlocks.join("\n\n")}`);
+  }
+
+  const plotLines = [];
+  if (gm.main_plot) plotLines.push(`- **主线情节脉络**：${gm.main_plot}`);
+  if (gm.initial_state && !d.set_initial_as_greeting) {
+    plotLines.push(`- **初始开局处境**：${gm.initial_state}`);
+  }
+  if (plotLines.length > 0) {
+    sections.push(`## 主线剧情设定\n${plotLines.join("\n")}`);
+  }
+
+  if (gm.play_rules) {
+    sections.push(
+      sections.length === 0 && !gm.play_rules.startsWith("#")
+        ? gm.play_rules
+        : `## 游玩规则\n${gm.play_rules}`
+    );
+  }
+
+  if (d.extra_raw_prompt && d.extra_raw_prompt.trim()) {
+    sections.push(d.extra_raw_prompt.trim());
+  }
+
+  const compiledSystemPrompt = sections.join("\n\n").trim();
+  const { enabled: stEnabled, modules: uiMods } = buildPresetUiModules(gm.status_preset || "none", d.existing_ui_modules);
+
+  const openingGreetings = [];
+  if (d.set_initial_as_greeting && gm.initial_state && gm.initial_state.trim()) {
+    openingGreetings.push({
+      id: "og_1",
+      title: "初始开局",
+      content: gm.initial_state.trim()
+    });
+  }
+
+  return normalizeProjectClient({
+    ...(d.id ? { id: d.id } : {}),
+    name: (d.name || "").trim() || "未命名游戏卡",
+    icon: d.icon || "",
+    avatar: d.icon || "",
+    description: d.description || "",
+    detailed_description: d.detailed_description || "",
+    custom_css: d.custom_css || "",
+    quick_replies: Array.isArray(d.quick_replies) ? d.quick_replies : [],
+    worldbook_defaults: d.worldbook_defaults,
+    cg_defaults: d.cg_defaults,
+    tags: Array.isArray(d.tags) ? d.tags : [],
+    card_tier: "simple",
+    simple_mode: false,
+    cot_enabled: true,
+    status_panel_enabled: stEnabled,
+    ui_modules: uiMods,
+    prefix: d.prefix || "",
+    system_prompt: compiledSystemPrompt,
+    suffix: d.suffix || "",
+    system_protocol_prompt: "",
+    opening_greetings: openingGreetings,
+    opening_statement: openingGreetings[0]?.content || "",
+    cg_book: (Array.isArray(d.cg_book) ? d.cg_book : []).filter((c) => c && (c.image_url || (c.keys && c.keys.length))),
+    world_book: Array.isArray(d.world_book) ? d.world_book : [],
+    regex_scripts: Array.isArray(d.regex_scripts) ? d.regex_scripts : [],
+    regex_replaces: Array.isArray(d.regex_scripts) ? d.regex_scripts : [],
+    guided_meta: {
+      ...gm,
+      set_initial_as_greeting: d.set_initial_as_greeting
+    },
+    use_global_params: true,
+    appearance: {
+      bg_image: d.bg_image || "",
+      bg_mobile: d.bg_mobile || "",
+      custom_css: d.custom_css || ""
+    }
+  });
+}
+
+window.openGuidedGameCardModal = function (sourceProjIdOrObj = null) {
+  const modal = document.getElementById("guidedGameCardModal");
+  if (!modal) return;
+  if (sourceProjIdOrObj && typeof sourceProjIdOrObj === "object") {
+    guidedCardDraft = buildGuidedDraftFromProject(sourceProjIdOrObj);
+  } else if (typeof sourceProjIdOrObj === "string" && sourceProjIdOrObj.trim()) {
+    const pMap = typeof projectsMap !== "undefined" ? projectsMap : window.projectsMap;
+    const found = (pMap && pMap[sourceProjIdOrObj]) || exploreUserProjectsCache.find((x) => x.id === sourceProjIdOrObj);
+    guidedCardDraft = found ? buildGuidedDraftFromProject(found) : createBlankGuidedDraft();
+  } else {
+    const pMap = typeof projectsMap !== "undefined" ? projectsMap : window.projectsMap;
+    const customCount = Object.values(pMap || {}).filter(
+      (p) => p && !["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(p.id)
+    ).length;
+    guidedCardDraft = createBlankGuidedDraft(`新企划 #${customCount + 1}`);
+  }
+  modal.style.display = "flex";
+  renderGuidedGameCardModal();
+};
+
+window.setGuidedCreatorStep = function (stepNum) {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  guidedCardDraft.step = Math.max(1, Math.min(3, Number(stepNum) || 1));
+  renderGuidedGameCardModal();
+};
+
+window.toggleGuidedQuickTag = function (tagStr) {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  const idx = guidedCardDraft.tags.indexOf(tagStr);
+  if (idx === -1) {
+    guidedCardDraft.tags.push(tagStr);
+  } else {
+    guidedCardDraft.tags.splice(idx, 1);
+  }
+  renderGuidedGameCardModal();
+};
+
+window.selectGuidedStatusPreset = function (presetKey) {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  guidedCardDraft.guided_meta.status_preset = presetKey;
+  renderGuidedGameCardModal();
+};
+
+window.addGuidedNpcRow = function () {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  guidedCardDraft.guided_meta.npcs.push({ name: "", role: "", desc: "", attitude: "" });
+  renderGuidedGameCardModal();
+};
+
+window.removeGuidedNpcRow = function (idx) {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  guidedCardDraft.guided_meta.npcs.splice(idx, 1);
+  renderGuidedGameCardModal();
+};
+
+window.importCharCardIntoGuidedNpcs = async function () {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  try {
+    const res = await fetch("/api/character_cards");
+    const data = await res.json();
+    const cards = Array.isArray(data) ? data : (data.cards || []);
+    if (cards.length === 0) {
+      showToast("角色卡库暂无卡片，可先在下方直接添加角色");
+      return;
+    }
+    const existingNames = new Set(guidedCardDraft.guided_meta.npcs.map((n) => n.name));
+    let added = 0;
+    cards.slice(0, 6).forEach((c) => {
+      const nm = (c.name || "").trim();
+      if (!nm || existingNames.has(nm)) return;
+      guidedCardDraft.guided_meta.npcs.push({
+        name: nm,
+        role: (c.tags || [])[0] || "角色卡导入",
+        desc: [c.description, c.personality].filter(Boolean).join("；").slice(0, 260),
+        attitude: (c.scenario || "").slice(0, 140)
+      });
+      existingNames.add(nm);
+      added++;
+    });
+    renderGuidedGameCardModal();
+    showToast(added > 0 ? `已从角色卡库载入 ${added} 名角色` : "角色卡库中的角色已在列表中");
+  } catch (err) {
+    showToast("读取角色卡库失败: " + err.message);
+  }
+};
+
+window.addGuidedCgRow = function () {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  guidedCardDraft.cg_book.push({
+    id: `cg_${Date.now().toString(36)}`,
+    name: `特殊CG #${guidedCardDraft.cg_book.length + 1}`,
+    image_url: "",
+    keys: [],
+    match_type: "OR",
+    trigger_source: "ai",
+    display_mode: "chat",
+    enabled: true
+  });
+  renderGuidedGameCardModal();
+};
+
+window.removeGuidedCgRow = function (idx) {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  guidedCardDraft.cg_book.splice(idx, 1);
+  renderGuidedGameCardModal();
+};
+
+window.handleUploadGuidedAsset = async function (event, slotType, cgIdx = -1) {
+  const file = event.target?.files?.[0];
+  if (!file || !guidedCardDraft) return;
+  syncGuidedDraftFromDom();
+  showToast("正在处理图片...");
+  try {
+    const maxDim = slotType === "icon" ? 720 : 1600;
+    const folder = slotType === "icon" ? "角色立绘" : "场景CG";
+    const url = await uploadImageAndGetUrl(file, maxDim, 0.85, folder);
+    if (slotType === "icon") {
+      guidedCardDraft.icon = url;
+    } else if (slotType === "bg_image") {
+      guidedCardDraft.bg_image = url;
+    } else if (slotType === "bg_mobile") {
+      guidedCardDraft.bg_mobile = url;
+    } else if (slotType === "cg" && cgIdx >= 0 && guidedCardDraft.cg_book[cgIdx]) {
+      guidedCardDraft.cg_book[cgIdx].image_url = url;
+    }
+    renderGuidedGameCardModal();
+    showToast("图片已就绪");
+  } catch (err) {
+    showToast("图片上传失败: " + err.message);
+  } finally {
+    try { event.target.value = ""; } catch (e) {}
+  }
+};
+
+window.clearGuidedAsset = function (slotType, event) {
+  if (event) event.stopPropagation();
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  if (slotType === "icon") guidedCardDraft.icon = "";
+  else if (slotType === "bg_image") guidedCardDraft.bg_image = "";
+  else if (slotType === "bg_mobile") guidedCardDraft.bg_mobile = "";
+  renderGuidedGameCardModal();
+};
+
+window.handleAiGenerateGuidedCard = async function (btnEl) {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  const gm = guidedCardDraft.guided_meta;
+  const idea = gm.idea_prompt || guidedCardDraft.description || "";
+  if (!idea.trim()) {
+    showToast("请先在输入框中写一句大致想法或题材（如：赛博东京特勤小队潜入黑帮大厦）");
+    document.getElementById("gcIdeaInput")?.focus();
+    return;
+  }
+  const selectedModel = document.getElementById("gcAiModelSelect")?.value || "";
+  const origHtml = btnEl ? btnEl.innerHTML : "✨ AI 生成设定";
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = "生成中...";
+  }
+  try {
+    const res = await fetch("/api/ai/generate_game_card", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        idea,
+        name: guidedCardDraft.name,
+        description: guidedCardDraft.description,
+        current_meta: gm,
+        model: selectedModel
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    const g = data.generated || {};
+
+    // 仅填充用户尚未手写的内容，保护已有设定不被覆盖
+    if ((!guidedCardDraft.name || /^新企划\s*#\d+$/.test(guidedCardDraft.name)) && g.name) {
+      guidedCardDraft.name = String(g.name).trim();
+    }
+    if (!guidedCardDraft.description && g.description) {
+      guidedCardDraft.description = String(g.description).trim();
+    }
+    if ((!guidedCardDraft.tags || guidedCardDraft.tags.length === 0) && Array.isArray(g.tags)) {
+      guidedCardDraft.tags = g.tags.map((x) => String(x).trim()).filter(Boolean);
+    }
+    const fillMetaKey = (k) => {
+      if (!gm[k] && g[k]) gm[k] = String(g[k]).trim();
+    };
+    [
+      "protagonist_name", "protagonist_desc", "protagonist_goal",
+      "world_name", "world_era", "world_conflict", "world_tone",
+      "main_plot", "initial_state", "play_rules"
+    ].forEach(fillMetaKey);
+
+    if ((!Array.isArray(gm.npcs) || gm.npcs.length === 0) && Array.isArray(g.npcs) && g.npcs.length > 0) {
+      gm.npcs = g.npcs.map((n) => ({
+        name: String(n.name || "").trim(),
+        role: String(n.role || "").trim(),
+        desc: String(n.desc || "").trim(),
+        attitude: String(n.attitude || "").trim()
+      }));
+    }
+    renderGuidedGameCardModal();
+    showToast("AI 已补全空白设定（可在第 1~3 步自由微调）");
+  } catch (err) {
+    showToast("AI 生成失败: " + err.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = origHtml;
+    }
+  }
+};
+
+window.upgradeGuidedDraftToAdvanced = async function () {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  const isExistingCard = Boolean(guidedCardDraft.id);
+  if (isExistingCard) {
+    if (!window.confirm(`确定将简易游戏卡「${guidedCardDraft.name || "未命名"}」升级为高级游戏卡吗？\n\n升级后将编译保留当前向导中的所有设定，并解锁世界书、内置 CSS、正则脚本与前后置词（单向升级不可退回简易卡）。`)) {
+      return;
+    }
+  }
+  const compiled = compileGuidedDraftToProject(guidedCardDraft);
+  compiled.card_tier = "advanced";
+  compiled.simple_mode = false;
+  if (["极速跑团", "简单跑团"].includes(String(compiled.category || "").trim())) {
+    compiled.category = "";
+  }
+
+  // 若是已落盘的简易卡，先立即持久化升级状态，再进入三栏高级工坊继续精修
+  if (isExistingCard) {
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(compiled)
+      });
+      if (res.ok) {
+        await loadProjects();
+      }
+    } catch (e) {}
+  }
+
+  advancedDraftProject = compiled;
+  currentAdvancedCreatorTab = "basic";
+  const gModal = document.getElementById("guidedGameCardModal");
+  if (gModal) gModal.style.display = "none";
+  const eModal = document.getElementById("exploreModal");
+  if (eModal) eModal.style.display = "flex";
+  renderAdvancedProjectEditor();
+  showToast(isExistingCard ? "已升级为高级游戏卡！现可编辑内置 CSS 与世界书" : "已升级至高级游戏卡工坊");
+};
+window.switchGuidedToAdvancedCreator = window.upgradeGuidedDraftToAdvanced;
+
+window.switchAdvancedToGuidedCreator = function () {
+  syncAdvancedDraftFromDom();
+  if (!advancedDraftProject) return;
+  guidedCardDraft = buildGuidedDraftFromProject(advancedDraftProject);
+  const eModal = document.getElementById("exploreModal");
+  if (eModal) eModal.style.display = "none";
+  const gModal = document.getElementById("guidedGameCardModal");
+  if (gModal) gModal.style.display = "flex";
+  renderGuidedGameCardModal();
+  showToast("已切换至简易创作向导");
+};
+
+window.submitGuidedGameCard = async function () {
+  syncGuidedDraftFromDom();
+  if (!guidedCardDraft) return;
+  const projPayload = compileGuidedDraftToProject(guidedCardDraft);
+  const isUpdatingExisting = Boolean(guidedCardDraft.id);
+
+  try {
+    let savedProj = null;
+    let newChatId = null;
+    if (isUpdatingExisting) {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(projPayload)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "保存失败");
+      savedProj = data.project;
+    } else {
+      const res = await fetch("/api/projects/fork", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: projPayload,
+          keep_exact_name: true
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "创建失败");
+      savedProj = data.project;
+      newChatId = data.chat_id || null;
+    }
+
+    const modal = document.getElementById("guidedGameCardModal");
+    if (modal) modal.style.display = "none";
+
+    window._welcomeModeStepSelected = true;
+    currentProjectId = savedProj.id;
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active_project_id: currentProjectId })
+    });
+    await loadProjects();
+    if (newChatId) {
+      currentChatId = newChatId;
+      await loadChats();
+      await switchChat(newChatId);
+    } else {
+      await loadChats();
+    }
+    applyProjectAppearance(getActiveProjectObj());
+    const pane = document.getElementById("studioWorkbenchPane");
+    if (pane && pane.style.display !== "none") {
+      renderStudioWorkbench();
+    }
+    showToast(isUpdatingExisting ? `已更新游戏卡：${savedProj.name}` : `已创建游戏卡：${savedProj.name}`);
+  } catch (err) {
+    showToast("保存游戏卡失败: " + err.message);
+  }
+};
+
+function _triggerBlobDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 400);
+}
+
+window.exportProjectGameCard = async function (projectId, fmt = "png") {
+  const pid = projectId || currentProjectId;
+  if (!pid) return;
+  // 若当前正在右侧面板编辑同一张卡，先自动落盘再导出
+  if (pid === currentProjectId && document.getElementById("studioWorkbenchPane")?.style.display !== "none") {
+    await window.saveStudioProjectConfig(false);
+  }
+  const pObj = (typeof projectsMap !== "undefined" && projectsMap && projectsMap[pid]) || null;
+  const safeName = ((pObj && pObj.name) || "游戏卡").replace(/[\\/:*?"<>|]+/g, "_");
+  showToast(fmt === "json" ? "正在导出 JSON 游戏卡..." : "正在生成 PNG 游戏卡海报...");
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(pid)}/export_card?format=${encodeURIComponent(fmt)}`);
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    _triggerBlobDownload(blob, `${safeName}_游戏卡.${fmt === "json" ? "json" : "png"}`);
+    showToast(`已导出：${safeName}_游戏卡.${fmt === "json" ? "json" : "png"}`);
+  } catch (err) {
+    showToast("导出游戏卡失败: " + err.message);
+  }
+};
+
+window.exportDraftGameCard = async function (sourceMode = "guided", fmt = "png") {
+  let draftProj = null;
+  if (sourceMode === "guided") {
+    syncGuidedDraftFromDom();
+    if (!guidedCardDraft) return;
+    draftProj = compileGuidedDraftToProject(guidedCardDraft);
+  } else {
+    syncAdvancedDraftFromDom();
+    if (!advancedDraftProject) return;
+    draftProj = JSON.parse(JSON.stringify(advancedDraftProject));
+  }
+  const safeName = (draftProj.name || "游戏卡").replace(/[\\/:*?"<>|]+/g, "_");
+  showToast(fmt === "json" ? "正在导出 JSON 游戏卡..." : "正在生成 PNG 游戏卡海报...");
+  try {
+    const res = await fetch("/api/projects/export_draft_card", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: draftProj, format: fmt })
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    _triggerBlobDownload(blob, `${safeName}_游戏卡.${fmt === "json" ? "json" : "png"}`);
+    showToast(`已导出：${safeName}_游戏卡.${fmt === "json" ? "json" : "png"}`);
+  } catch (err) {
+    showToast("导出草稿游戏卡失败: " + err.message);
+  }
+};
+
+window.importGameCardFileList = async function (rawFileList) {
+  const files = Array.from(rawFileList || []).filter((f) => f && /\.(png|json)$/i.test(f.name || ""));
+  if (files.length === 0) {
+    if (rawFileList && rawFileList.length > 0) {
+      showToast("仅支持导入 .png 或 .json 格式的游戏卡");
+    }
+    return;
+  }
+  showToast(`正在导入 ${files.length} 张游戏卡...`);
+  let lastImported = null;
+  let lastChatId = null;
+  let okCount = 0;
+
+  try {
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/projects/import_card", {
+        method: "POST",
+        body: fd
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(`导入「${file.name}」失败: ${data.detail || res.status}`);
+        continue;
+      }
+      okCount++;
+      lastImported = data.project;
+      lastChatId = data.chat_id || null;
+    }
+
+    if (okCount > 0 && lastImported) {
+      document.getElementById("guidedGameCardModal") && (document.getElementById("guidedGameCardModal").style.display = "none");
+      document.getElementById("exploreModal") && (document.getElementById("exploreModal").style.display = "none");
+      window._welcomeModeStepSelected = true;
+      currentProjectId = lastImported.id;
+      await loadProjects();
+      await loadChats();
+      if (lastChatId) {
+        currentChatId = lastChatId;
+        await switchChat(lastChatId);
+      }
+      applyProjectAppearance(getActiveProjectObj());
+      const pane = document.getElementById("studioWorkbenchPane");
+      if (pane && pane.style.display !== "none") {
+        renderStudioWorkbench();
+      }
+      showToast(okCount === 1 ? `已导入游戏卡：${lastImported.name}` : `成功导入 ${okCount} 张游戏卡`);
+    }
+  } catch (err) {
+    showToast("导入游戏卡异常: " + err.message);
+  }
+};
+
+window.handleImportGameCardFiles = async function (event) {
+  try {
+    await window.importGameCardFileList(event.target?.files || []);
+  } finally {
+    try { event.target.value = ""; } catch (e) {}
+  }
+};
+
+function renderGuidedGameCardModal() {
+  const inner = document.getElementById("guidedGameCardModalInner");
+  if (!inner || !guidedCardDraft) return;
+  const d = guidedCardDraft;
+  const gm = d.guided_meta;
+  const step = d.step || 1;
+  const isEditing = Boolean(d.id);
+
+  let stepBodyHtml = "";
+  if (step === 1) {
+    stepBodyHtml = `
+      <!-- AI 一句话灵感入口（第1步与第2步均可直接触发，不填则保持纯净 0 提示词） -->
+      <div class="gc-ai-banner">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          <span style="font-size:12.5px;font-weight:700;color:var(--tc-fcd34d, #fcd34d);">✨ 一句话 AI 构筑游戏卡 <small style="font-weight:400;color:var(--text-muted);">（选填；不点生成、直接留空创建即为纯净 0 提示词）</small></span>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span style="font-size:11.5px;color:var(--text-muted);">模型</span>
+            <select id="gcAiModelSelect" class="form-select ai-assist-model-select" style="width:auto;max-width:190px;padding:2px 24px 2px 8px;font-size:11.5px;height:26px;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)"></select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:stretch;flex-wrap:wrap;">
+          <input type="text" id="gcIdeaInput" class="form-input" style="flex:1;min-width:220px;" value="${escapeHtml(gm.idea_prompt || "")}" placeholder="例：2032年近未来新港市，扮演特勤干员潜入黑帮盘踞的冷链码头解救人质..." onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('btnGcAiGen')?.click();}" />
+          <button type="button" id="btnGcAiGen" class="btn btn-sm btn-primary" style="white-space:nowrap;" onclick="window.handleAiGenerateGuidedCard(this)">✨ AI 生成全部设定</button>
+        </div>
+      </div>
+
+      <!-- 视觉上传三联卡：封面海报 / 电脑背景 / 手机背景（全部选填，不强制） -->
+      <div class="gc-upload-grid">
+        <div class="gc-upload-slot" onclick="document.getElementById('gcCoverFile').click()">
+          <input type="file" id="gcCoverFile" accept="image/*" style="display:none;" onchange="window.handleUploadGuidedAsset(event, 'icon')" />
+          ${d.icon
+            ? `<img src="${escapeHtml(d.icon)}" alt="封面" class="gc-slot-img" />
+               <button type="button" class="gc-slot-clear" onclick="window.clearGuidedAsset('icon', event)" title="移除">✕</button>`
+            : `<div class="gc-slot-placeholder">
+                 <span class="gc-slot-plus">+</span>
+                 <b>封面照片</b>
+                 <small>比例 3:4 / 4:3 · 导出 PNG 游戏卡卡面</small>
+               </div>`
+          }
+        </div>
+
+        <div class="gc-upload-slot" onclick="document.getElementById('gcBgDesktopFile').click()">
+          <input type="file" id="gcBgDesktopFile" accept="image/*" style="display:none;" onchange="window.handleUploadGuidedAsset(event, 'bg_image')" />
+          ${d.bg_image
+            ? `<img src="${escapeHtml(d.bg_image)}" alt="电脑背景" class="gc-slot-img" />
+               <button type="button" class="gc-slot-clear" onclick="window.clearGuidedAsset('bg_image', event)" title="移除">✕</button>`
+            : `<div class="gc-slot-placeholder">
+                 <span class="gc-slot-plus">+</span>
+                 <b>聊天背景（横屏）</b>
+                 <small>推荐 16:9 · 电脑端游玩背景</small>
+               </div>`
+          }
+        </div>
+
+        <div class="gc-upload-slot" onclick="document.getElementById('gcBgMobileFile').click()">
+          <input type="file" id="gcBgMobileFile" accept="image/*" style="display:none;" onchange="window.handleUploadGuidedAsset(event, 'bg_mobile')" />
+          ${d.bg_mobile
+            ? `<img src="${escapeHtml(d.bg_mobile)}" alt="手机背景" class="gc-slot-img" />
+               <button type="button" class="gc-slot-clear" onclick="window.clearGuidedAsset('bg_mobile', event)" title="移除">✕</button>`
+            : `<div class="gc-slot-placeholder">
+                 <span class="gc-slot-plus">+</span>
+                 <b>移动设备背景</b>
+                 <small>推荐 9:16 · 手机/竖屏自动切换</small>
+               </div>`
+          }
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1.2fr;gap:12px;">
+        <div>
+          <label class="gc-field-label">游戏卡名称</label>
+          <input type="text" id="gcNameInput" class="form-input" value="${escapeHtml(d.name || "")}" placeholder="为你的游戏企划起个名字" />
+        </div>
+        <div>
+          <label class="gc-field-label">题材标签 <small>（逗号分隔，或点下方标签）</small></label>
+          <input type="text" id="gcTagsInput" class="form-input" value="${escapeHtml((d.tags || []).join(", "))}" placeholder="奇幻, 潜入, 多分支" />
+        </div>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:-4px;">
+        ${GUIDED_QUICK_TAGS.map((tg) => {
+          const active = (d.tags || []).includes(tg);
+          return `<button type="button" class="gc-tag-chip ${active ? "active" : ""}" onclick="window.toggleGuidedQuickTag('${escapeJsAttr(tg)}')">#${escapeHtml(tg)}</button>`;
+        }).join("")}
+      </div>
+
+      <div>
+        <label class="gc-field-label">作品简介 <small>（仅展示给玩家看的游戏卡介绍，不会发送给 AI）</small></label>
+        <textarea id="gcDescInput" rows="3" class="form-textarea" placeholder="向玩家介绍你的作品亮点、故事背景、阵营玩法或注意事项...">${escapeHtml(d.description || "")}</textarea>
+      </div>
+    `;
+  } else if (step === 2) {
+    stepBodyHtml = `
+      <div class="gc-ai-banner">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          <span style="font-size:12.5px;font-weight:700;color:var(--tc-fcd34d, #fcd34d);">✨ AI 设定补全 <small style="font-weight:400;color:var(--text-muted);">（已有内容的框会自动保留，只补全空白项）</small></span>
+          <select id="gcAiModelSelect" class="form-select ai-assist-model-select" style="width:auto;max-width:190px;padding:2px 24px 2px 8px;font-size:11.5px;height:26px;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)"></select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:stretch;flex-wrap:wrap;">
+          <input type="text" id="gcIdeaInput" class="form-input" style="flex:1;min-width:220px;" value="${escapeHtml(gm.idea_prompt || "")}" placeholder="输入大致描述，让 AI 自动生成下方角色与世界观设定..." />
+          <button type="button" class="btn btn-sm btn-primary" onclick="window.handleAiGenerateGuidedCard(this)">✨ AI 生成</button>
+        </div>
+      </div>
+
+      <!-- 主人公（玩家）设定 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header">
+          <div class="studio-section-title">主人公（玩家）设定</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:10px;margin-bottom:8px;">
+          <div>
+            <label class="gc-field-label">主人公名称 / 身份</label>
+            <input type="text" id="gcProtName" class="form-input" value="${escapeHtml(gm.protagonist_name || "")}" placeholder="例：玩家自定 / 第七分署新晋特工" />
+          </div>
+          <div>
+            <label class="gc-field-label">核心动机 / 初始目标</label>
+            <input type="text" id="gcProtGoal" class="form-input" value="${escapeHtml(gm.protagonist_goal || "")}" placeholder="例：追查失踪线人的下落并在灰港活下去" />
+          </div>
+        </div>
+        <div>
+          <label class="gc-field-label">主人公背景与特长</label>
+          <textarea id="gcProtDesc" rows="2" class="form-textarea" placeholder="例：年轻的流浪剑士，身手敏捷但过去充满谜团（留空则完全交由玩家开局自由扮演）">${escapeHtml(gm.protagonist_desc || "")}</textarea>
+        </div>
+      </div>
+
+      <!-- 世界观设定 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header">
+          <div class="studio-section-title">世界观设定</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
+          <div>
+            <label class="gc-field-label">世界 / 舞台名称</label>
+            <input type="text" id="gcWorldName" class="form-input" value="${escapeHtml(gm.world_name || "")}" placeholder="故事展开的世界、城市或国家名" />
+          </div>
+          <div>
+            <label class="gc-field-label">整体基调与氛围</label>
+            <input type="text" id="gcWorldTone" class="form-input" value="${escapeHtml(gm.world_tone || "")}" placeholder="例：冷硬写实、黑暗奇幻、悬疑压迫、轻松搞笑" />
+          </div>
+        </div>
+        <div style="margin-bottom:8px;">
+          <label class="gc-field-label">时代背景与科技 / 魔法水平</label>
+          <textarea id="gcWorldEra" rows="2" class="form-textarea" placeholder="例：近未来2032年港口都市，写实热武器与帮派武装割据，无超自然异能...">${escapeHtml(gm.world_era || "")}</textarea>
+        </div>
+        <div>
+          <label class="gc-field-label">核心冲突 / 主题</label>
+          <textarea id="gcWorldConflict" rows="2" class="form-textarea" placeholder="例：治安局、黑帮辛迪加与财团安保三方暗战，每一次潜入都可能面临背叛...">${escapeHtml(gm.world_conflict || "")}</textarea>
+        </div>
+      </div>
+
+      <!-- 登场角色设定 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+          <div class="studio-section-title">关键角色设定 (${(gm.npcs || []).length})</div>
+          <div style="display:flex;gap:6px;">
+            <button type="button" class="btn btn-xs btn-secondary" onclick="window.importCharCardIntoGuidedNpcs()">从角色卡库导入</button>
+            <button type="button" class="btn btn-xs btn-primary" onclick="window.addGuidedNpcRow()">+ 添加角色</button>
+          </div>
+        </div>
+        <div id="gcNpcList" style="display:flex;flex-direction:column;gap:8px;">
+          ${(gm.npcs || []).length === 0
+            ? `<div style="padding:10px;border:1px dashed var(--border-subtle);border-radius:8px;text-align:center;font-size:12px;color:var(--text-dim);">选填：可添加核心 NPC 档案，或留空由 AI 在剧情中动态生成</div>`
+            : (gm.npcs || []).map((npc, idx) => `
+              <div class="gc-npc-card">
+                <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;">
+                  <input type="text" class="form-input gc-npc-name" value="${escapeHtml(npc.name || "")}" placeholder="角色姓名" />
+                  <input type="text" class="form-input gc-npc-role" value="${escapeHtml(npc.role || "")}" placeholder="身份 / 阵营" />
+                  <button type="button" class="btn btn-xs btn-danger" onclick="window.removeGuidedNpcRow(${idx})">✕</button>
+                </div>
+                <input type="text" class="form-input gc-npc-desc" value="${escapeHtml(npc.desc || "")}" placeholder="外貌、性格、武器与能力特长..." />
+                <input type="text" class="form-input gc-npc-attitude" value="${escapeHtml(npc.attitude || "")}" placeholder="对主角初始态度与隐藏动机..." />
+              </div>
+            `).join("")
+          }
+        </div>
+      </div>
+    `;
+  } else {
+    const curPreset = gm.status_preset || "none";
+    const presets = [
+      { key: "none", title: "纯净无状态栏", desc: "0 额外系统注入，仅发送你编写的设定或自定义模板" },
+      { key: "standard", title: "标准跑团 6 栏", desc: "自动挂载：主角状态、装备栏、物品栏、角色关系、行动选项" },
+      { key: "tactical", title: "硬核战术身体栏", desc: "额外包含身体各部位负伤状态、武器装备与战术选项" },
+      { key: "investigative", title: "悬疑调查线索栏", desc: "包含生命/理智(SAN值)、任务线索卡、随身证物与人际动态" }
+    ];
+    if (curPreset === "keep") {
+      presets.unshift({ key: "keep", title: "保留当前自定义栏位", desc: `沿用已配置的 ${(d.existing_ui_modules || []).length} 个功能栏` });
+    }
+    stepBodyHtml = `
+      <!-- 主线与初始开局 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header">
+          <div class="studio-section-title">主线情节与初始开局</div>
+          <label class="checkbox-label" style="font-size:12px;">
+            <input type="checkbox" id="gcSetInitialGreeting" ${d.set_initial_as_greeting ? "checked" : ""} />
+            <span>将「初始剧情状态」设为进场开场白</span>
+          </label>
+        </div>
+        <div style="margin-bottom:8px;">
+          <label class="gc-field-label">主线情节设定</label>
+          <textarea id="gcMainPlot" rows="2" class="form-textarea" placeholder="例：主角在一次常规护送委托中意外截获了财团的实验黑匣子，必须在多方围捕中揭开真相...">${escapeHtml(gm.main_plot || "")}</textarea>
+        </div>
+        <div>
+          <label class="gc-field-label">初始剧情状态（第一幕开场情景）</label>
+          <textarea id="gcInitialState" rows="3" class="form-textarea" placeholder="例：雨夜十一点，你坐在第七区地下安全屋的折叠椅上，调度员把三份加急档案拍在铁桌上...">${escapeHtml(gm.initial_state || "")}</textarea>
+        </div>
+      </div>
+
+      <!-- 游玩规则 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header">
+          <div class="studio-section-title">游玩规则（AI 主持守则）</div>
+        </div>
+        <textarea id="gcPlayRules" rows="4" class="form-textarea" placeholder="AI 扮演主持时需要遵守的法则（例：无主角光环、行动按属性与装备真实判定成败、严禁代替玩家说话或做决定；也可直接粘贴完整规则提示词）">${escapeHtml(gm.play_rules || "")}</textarea>
+      </div>
+
+      <!-- 状态栏模板选择 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header">
+          <div class="studio-section-title">状态栏预设 <small style="font-weight:400;color:var(--text-muted);">（创建后随时可在右侧剧本设定中增删改字段）</small></div>
+        </div>
+        <div class="gc-preset-grid">
+          ${presets.map((p) => `
+            <div class="gc-preset-card ${curPreset === p.key ? "active" : ""}" onclick="window.selectGuidedStatusPreset('${p.key}')">
+              <div class="gc-preset-title">${escapeHtml(p.title)}</div>
+              <div class="gc-preset-desc">${escapeHtml(p.desc)}</div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+
+      <!-- 特殊事件 CG 触发 -->
+      <div class="studio-section-card" style="margin:0;">
+        <div class="studio-section-header" style="flex-wrap:wrap;gap:6px;">
+          <div class="studio-section-title">特殊事件 CG 触发 (${(d.cg_book || []).length})</div>
+          <button type="button" class="btn btn-xs btn-primary" onclick="window.addGuidedCgRow()">+ 新增 CG 触发</button>
+        </div>
+        <div id="gcCgList" style="display:flex;flex-direction:column;gap:8px;">
+          ${(d.cg_book || []).length === 0
+            ? `<div style="padding:10px;border:1px dashed var(--border-subtle);border-radius:8px;text-align:center;font-size:12px;color:var(--text-dim);">选填：当 AI 剧情出现指定关键词时，自动在聊天中弹出插画或切换场景背景</div>`
+            : (d.cg_book || []).map((cg, idx) => `
+              <div class="gc-cg-card" data-img-url="${escapeHtml(cg.image_url || "")}">
+                <div class="gc-cg-thumb" onclick="document.getElementById('gcCgFile_${idx}').click()" title="点击上传 CG 图片">
+                  <input type="file" id="gcCgFile_${idx}" accept="image/*" style="display:none;" onchange="window.handleUploadGuidedAsset(event, 'cg', ${idx})" />
+                  ${cg.image_url ? `<img src="${escapeHtml(cg.image_url)}" alt="CG" />` : `<span>+ 传图</span>`}
+                </div>
+                <div style="flex:1;min-width:200px;display:flex;flex-direction:column;gap:6px;">
+                  <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                    <input type="text" class="form-input gc-cg-name" style="width:130px;padding:4px 8px;font-size:12px;" value="${escapeHtml(cg.name || "")}" placeholder="CG 名称" />
+                    <input type="text" class="form-input gc-cg-keys" style="flex:1;min-width:140px;padding:4px 8px;font-size:12px;" value="${escapeHtml(Array.isArray(cg.keys) ? cg.keys.join(", ") : (cg.keys || ""))}" placeholder="触发词（逗号分隔，如：破门, 潜入成功）" />
+                    <button type="button" class="btn btn-xs btn-danger" onclick="window.removeGuidedCgRow(${idx})">✕</button>
+                  </div>
+                  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--text-muted);">
+                    <span>触发区域:</span>
+                    <select class="form-select gc-cg-source" style="width:auto;padding:2px 22px 2px 6px;height:24px;font-size:11.5px;">
+                      <option value="ai" ${cg.trigger_source !== "both" ? "selected" : ""}>仅 AI 回复</option>
+                      <option value="both" ${cg.trigger_source === "both" ? "selected" : ""}>玩家 + AI</option>
+                    </select>
+                    <span>条件:</span>
+                    <select class="form-select gc-cg-match" style="width:auto;padding:2px 22px 2px 6px;height:24px;font-size:11.5px;">
+                      <option value="OR" ${cg.match_type !== "AND" ? "selected" : ""}>或 (任一命中)</option>
+                      <option value="AND" ${cg.match_type === "AND" ? "selected" : ""}>与 (全部命中)</option>
+                    </select>
+                    <span>映射:</span>
+                    <select class="form-select gc-cg-display" style="width:auto;padding:2px 22px 2px 6px;height:24px;font-size:11.5px;">
+                      <option value="chat" ${cg.display_mode !== "background" ? "selected" : ""}>聊天插图</option>
+                      <option value="background" ${cg.display_mode === "background" ? "selected" : ""}>切换背景图</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            `).join("")
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  inner.innerHTML = `
+    <div class="modal-header" style="flex-wrap:wrap;gap:8px;">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <h3 style="margin:0;">${isEditing ? "编辑简易游戏卡" : "新建简易游戏卡"}</h3>
+        <span class="proj-tier-tag tier-simple" style="padding:2px 8px;font-size:11px;">简易卡</span>
+        <span class="wb-badge" style="font-size:11px;">兼容酒馆 PNG / JSON</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-left:auto;">
+        <button type="button" class="btn btn-xs btn-secondary" onclick="document.getElementById('globalGameCardImportInput')?.click()" title="导入本工作台或 SillyTavern 酒馆的 .png/.json 游戏卡">导入游戏卡</button>
+        <button type="button" class="btn btn-xs btn-primary" onclick="window.upgradeGuidedDraftToAdvanced()" title="将此简易游戏卡升级为高级游戏卡（解锁世界书、内置CSS、正则与前后置词）">⬆ 升级为高级卡</button>
+        <button class="modal-close" type="button" onclick="document.getElementById('guidedGameCardModal').style.display='none'">✕</button>
+      </div>
+    </div>
+
+    <!-- 顶部可自由点击跳转的三步进度条 -->
+    <div class="gc-stepper">
+      <button type="button" class="gc-step-item ${step === 1 ? "active" : (step > 1 ? "done" : "")}" onclick="window.setGuidedCreatorStep(1)">
+        <span class="gc-step-num">01</span>
+        <span class="gc-step-label">基础与外观</span>
+      </button>
+      <div class="gc-step-line ${step > 1 ? "done" : ""}"></div>
+      <button type="button" class="gc-step-item ${step === 2 ? "active" : (step > 2 ? "done" : "")}" onclick="window.setGuidedCreatorStep(2)">
+        <span class="gc-step-num">02</span>
+        <span class="gc-step-label">角色与世界观</span>
+      </button>
+      <div class="gc-step-line ${step > 2 ? "done" : ""}"></div>
+      <button type="button" class="gc-step-item ${step === 3 ? "active" : ""}" onclick="window.setGuidedCreatorStep(3)">
+        <span class="gc-step-num">03</span>
+        <span class="gc-step-label">剧情、规则与触发</span>
+      </button>
+    </div>
+
+    <div class="modal-body gc-modal-body">
+      ${stepBodyHtml}
+    </div>
+
+    <div class="modal-footer" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <div style="display:flex;gap:6px;align-items:center;">
+        ${step > 1 ? `<button type="button" class="btn btn-sm btn-secondary" onclick="window.setGuidedCreatorStep(${step - 1})">← 上一步</button>` : ""}
+        ${step < 3 ? `<button type="button" class="btn btn-sm btn-secondary" onclick="window.setGuidedCreatorStep(${step + 1})">下一步 →</button>` : ""}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.exportDraftGameCard('guided', 'png')" title="导出为可分享的 PNG 海报游戏卡（可直接导入本工作台或 SillyTavern 酒馆）">导出 PNG 卡</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.exportDraftGameCard('guided', 'json')" title="导出为 JSON 游戏卡">导出 JSON</button>
+        <button type="button" class="btn btn-sm btn-primary" style="padding:7px 18px;font-weight:700;" onclick="window.submitGuidedGameCard()">
+          ${isEditing ? "保存游戏卡" : "创建并游玩"}
+        </button>
+      </div>
+    </div>
+  `;
+
+  if (typeof window.syncAllAiAssistModelSelects === "function") {
+    window.syncAllAiAssistModelSelects();
+  }
+  const modal = document.getElementById("guidedGameCardModal");
+  if (typeof window.translateSubtree === "function" && modal) {
+    window.translateSubtree(modal);
+  }
+}

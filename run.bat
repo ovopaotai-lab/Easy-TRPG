@@ -36,7 +36,7 @@ if "%ERRORLEVEL%"=="42" (
     echo [一键更新完成，正在自动重启 AI 跑团服务...]
     goto server_loop
 )
-pause
+if not "%ERRORLEVEL%"=="0" pause
 exit /b 0
 
 :err_not_extracted

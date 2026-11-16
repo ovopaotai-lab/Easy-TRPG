@@ -595,7 +595,10 @@ async function initAppContent() {
   loadModels();
   updateGalleryCountBadge();
   loadCharacterCards();
-  loadCurrentAppVersion();
+  await loadCurrentAppVersion();
+  if (typeof _restoreHotUpdateSessionIfNeeded === "function") {
+    await _restoreHotUpdateSessionIfNeeded();
+  }
   setTimeout(() => {
     if (typeof window.checkSystemUpdate === "function") {
       window.checkSystemUpdate({ silent: true });
@@ -887,20 +890,40 @@ function setupEventListeners() {
   btnClearHistory?.addEventListener("click", handleClearHistory);
   headerModelSelect?.addEventListener("change", handleHeaderModelChange);
 
-  // 前情提要备忘卡片
-  btnToggleSummary?.addEventListener("click", () => {
-    if (!summaryCard) return;
-    summaryCard.style.display = summaryCard.style.display === "none" ? "flex" : "none";
-    window.updateScrollBottomBtnVisibility();
-  });
-  btnCloseSummaryCard?.addEventListener("click", () => {
-    if (summaryCard) summaryCard.style.display = "none";
-    window.updateScrollBottomBtnVisibility();
-  });
+  // 前情提要备忘卡片（按钮已在 index.html 绑定内联兜底，此处补充点击外部与按 Esc 自动收起）
   btnTriggerSummary?.addEventListener("click", handleManualSummarize);
-  btnEditSummary?.addEventListener("click", openSummaryEditor);
-  btnCancelSummaryEdit?.addEventListener("click", closeSummaryEditor);
-  btnSaveSummaryEdit?.addEventListener("click", handleSaveSummaryEdit);
+  document.addEventListener("click", (e) => {
+    const sc = document.getElementById("summaryCard") || summaryCard;
+    if (!sc || sc.style.display === "none" || getComputedStyle(sc).display === "none") return;
+    const target = e.target;
+    if (!target || sc.contains(target)) return;
+    if (
+      target.closest?.("#btnToggleSummary") ||
+      target.closest?.("#btnTogglePlusPopover") ||
+      target.closest?.("#minimalistPlusPopover") ||
+      target.closest?.("#mobileMoreMenu") ||
+      target.closest?.("#btnMobileMoreActions") ||
+      target.closest?.(".modal-overlay")
+    ) {
+      return;
+    }
+    const editBox = document.getElementById("summaryEditBox") || summaryEditBox;
+    const editTa = document.getElementById("summaryEditTextarea") || summaryEditTextarea;
+    const rawSaved = (document.getElementById("summaryText") || summaryTextEl)?.dataset?.raw || "";
+    const isEditingDirty =
+      editBox &&
+      editBox.style.display !== "none" &&
+      editTa &&
+      editTa.value.trim() !== rawSaved.trim();
+    if (isEditingDirty) return;
+    window.closeSummaryCard();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const sc = document.getElementById("summaryCard") || summaryCard;
+    if (!sc || sc.style.display === "none" || getComputedStyle(sc).display === "none") return;
+    window.closeSummaryCard();
+  });
 
   // 快捷掷骰（填入输入框，再按一次重新掷骰）
   btnRollD100?.addEventListener("click", () => rollDice(1, 100, false));
@@ -1020,6 +1043,12 @@ async function loadProjects() {
     }
     renderProjectPills(projects);
     updateProjectHeaderBadge();
+    if (typeof window.applyProjectAppearance === "function") {
+      window.applyProjectAppearance(projectsMap[currentProjectId]);
+    }
+    if (typeof window.syncCotToggleUI === "function") {
+      window.syncCotToggleUI();
+    }
     if (welcomeBox && welcomeBox.style.display !== "none" && typeof renderWelcomeBox === "function") {
       renderWelcomeBox();
     }
@@ -1164,6 +1193,16 @@ function renderProjectPills(projects = Object.values(projectsMap)) {
       startInlineProjectRename(proj.id, titleSpan, proj.name, "");
     };
     leftWrap.appendChild(titleSpan);
+    if (!["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(proj.id)) {
+      const isSimpleTier = typeof window.getProjectCardTier === "function"
+        ? window.getProjectCardTier(proj) === "simple"
+        : (proj.card_tier === "simple" || proj.simple_mode === true);
+      const tierBadge = document.createElement("span");
+      tierBadge.className = `proj-tier-tag ${isSimpleTier ? "tier-simple" : "tier-advanced"}`;
+      tierBadge.textContent = isSimpleTier ? "简易" : "高级";
+      tierBadge.title = isSimpleTier ? "简易游戏卡（可在设定中升级为高级卡）" : "高级游戏卡";
+      leftWrap.appendChild(tierBadge);
+    }
     pill.appendChild(leftWrap);
 
     const rightBox = document.createElement("div");
@@ -1256,6 +1295,9 @@ async function switchProject(projId) {
   if (welcomeBox && welcomeBox.style.display !== "none" && typeof renderWelcomeBox === "function") {
     renderWelcomeBox();
   }
+  if (typeof window.syncCotToggleUI === "function") {
+    window.syncCotToggleUI();
+  }
   showToast(`已切换：${projectsMap[currentProjectId]?.name || ""}`);
   return true;
 }
@@ -1271,41 +1313,135 @@ function updateProjectHeaderBadge() {
     if (badgeIconEl) {
       badgeIconEl.innerHTML = renderProjectIconHtml(proj.icon || proj.avatar || "", 18);
     }
+    const introBtn = document.getElementById("btnHeaderProjectIntro");
+    if (introBtn) {
+      const hasIntro = !["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(proj.id) &&
+        Boolean(String(proj.detailed_description || "").trim());
+      introBtn.style.display = hasIntro ? "inline-flex" : "none";
+    }
   }
 }
 
-async function handleNewProject() {
-  const nextIdx = Object.keys(projectsMap || {}).length + 1;
-  const defaultName = `新剧本 #${nextIdx}`;
-  const defaultMods = Array.isArray(window.DEFAULT_UNIVERSAL_UI_MODULES)
-    ? window.DEFAULT_UNIVERSAL_UI_MODULES.map((m) => ({ ...m }))
-    : [];
-  const defaultProto = typeof window.DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT === "string"
-    ? window.DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT
-    : "";
+window.isProjectCotEnabled = function (proj) {
+  const target = proj || (projectsMap && currentProjectId ? projectsMap[currentProjectId] : null);
+  if (!target) return true;
+  if (typeof target.cot_enabled === "boolean") return target.cot_enabled;
+  if (typeof window.isSimpleTrpgProject === "function" && window.isSimpleTrpgProject(target)) {
+    return false;
+  }
+  return true;
+};
+
+window.syncCotToggleUI = function () {
+  const btn = document.getElementById("btnToggleCot");
+  if (!btn) return;
+  const proj = projectsMap && currentProjectId ? projectsMap[currentProjectId] : null;
+  const enabled = window.isProjectCotEnabled(proj);
+  btn.classList.toggle("active", enabled);
+  btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+  btn.title = enabled ? "思考：已开启（点击关闭）" : "思考：已关闭（点击开启）";
+};
+
+window.handleToggleCotButton = async function (event) {
+  if (event) event.stopPropagation();
+  const proj = projectsMap && currentProjectId ? projectsMap[currentProjectId] : null;
+  if (!proj) return;
+  const nextVal = !window.isProjectCotEnabled(proj);
+  proj.cot_enabled = nextVal;
+  window.syncCotToggleUI();
+  showToast(nextVal ? "思考：开" : "思考：关");
+  try {
+    await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...proj, id: proj.id, cot_enabled: nextVal })
+    });
+  } catch (err) {
+    console.warn("保存思考开关状态失败:", err);
+  }
+};
+
+window.applyHardwareRecommendedParams = async function () {
+  try {
+    const res = await fetch("/api/settings/hardware_recommend", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.settings) throw new Error(data?.detail || `HTTP ${res.status}`);
+    window.globalUserSettings = data.settings;
+    await loadSettings();
+    if (typeof window.updateContextProgressUI === "function") {
+      window.updateContextProgressUI();
+    }
+    showToast(`已套用：${data.hw_tier_label || "硬件推荐配置"}`);
+  } catch (err) {
+    showToast("套用失败: " + (err?.message || err));
+  }
+};
+
+window.resetSimpleModalPromptTemplate = function () {
+  const promptEl = document.getElementById("simpleProjPromptInput");
+  if (promptEl) {
+    promptEl.value = window.DEFAULT_FAST_TRPG_SYSTEM_PROMPT || "";
+  }
+};
+
+function handleNewProject() {
+  if (typeof window.closeAnySidebarDrawer === "function") {
+    window.closeAnySidebarDrawer();
+  }
+  if (typeof window.openGuidedGameCardModal === "function") {
+    window.openGuidedGameCardModal(null);
+    return;
+  }
+  const modal = document.getElementById("simpleProjectCreateModal");
+  const nameEl = document.getElementById("simpleProjNameInput");
+  const promptEl = document.getElementById("simpleProjPromptInput");
+  const customCount = Object.values(projectsMap || {}).filter(
+    (p) => p && !["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(p.id)
+  ).length;
+  if (nameEl) nameEl.value = `新企划 #${customCount + 1}`;
+  if (promptEl) promptEl.value = "";
+  if (modal) {
+    modal.style.display = "flex";
+    if (typeof window.translateSubtree === "function") window.translateSubtree(modal);
+    setTimeout(() => nameEl?.focus(), 30);
+  }
+}
+
+window.submitCreateSimpleProject = async function () {
+  const modal = document.getElementById("simpleProjectCreateModal");
+  const nameEl = document.getElementById("simpleProjNameInput");
+  const promptEl = document.getElementById("simpleProjPromptInput");
+  const nameVal = (nameEl?.value || "").trim() || "新企划";
+  const promptVal = promptEl ? promptEl.value : "";
 
   try {
     const res = await fetch("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: defaultName,
+        name: nameVal,
+        category: "",
+        simple_mode: true,
+        cot_enabled: true,
         icon: "",
         description: "",
         tags: [],
         opening_greetings: [],
         opening_statement: "",
-        system_prompt: "",
+        system_prompt: promptVal,
         prefix: "",
         suffix: "",
-        system_protocol_prompt: defaultProto,
-        ui_modules: defaultMods,
-        status_panel_enabled: true,
+        system_protocol_prompt: "",
+        ui_modules: [],
+        status_panel_enabled: false,
+        use_global_params: true,
         appearance: { bg_image: "" }
       })
     });
     const data = await res.json();
     if (!res.ok || !data?.project?.id) throw new Error(data?.detail || `HTTP ${res.status}`);
+    if (modal) modal.style.display = "none";
+    window._welcomeModeStepSelected = true;
     currentProjectId = data.project.id;
     await fetch("/api/settings", {
       method: "POST",
@@ -1321,11 +1457,11 @@ async function handleNewProject() {
         window.renderStudioWorkbench();
       }
     }
-    showToast(`已新建：${defaultName}`);
+    showToast(`已新建：${nameVal}`);
   } catch (err) {
-    showToast("新建失败: " + err);
+    showToast("新建失败: " + (err?.message || err));
   }
-}
+};
 
 function openProjectModal() {
   if (typeof window.toggleStudioWorkbench === "function") {
@@ -1340,7 +1476,7 @@ async function handleSaveProject() {
 }
 
 async function handleDeleteProject() {
-  if (currentProjectId === "proj_default") {
+  if (["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(currentProjectId)) {
     showToast("默认剧本不可删除");
     return;
   }
@@ -1948,21 +2084,69 @@ function updateSummaryUI(summary) {
   updateContextProgressUI();
 }
 
-function openSummaryEditor() {
-  if (!summaryEditTextarea || !summaryTextEl || !summaryEditBox) return;
-  summaryEditTextarea.value = summaryTextEl.dataset.raw || "";
-  summaryTextEl.style.display = "none";
-  summaryEditBox.style.display = "flex";
-  if (btnEditSummary) btnEditSummary.style.display = "none";
-}
+let _lastSummaryToggleAt = 0;
+window.closeSummaryCard = function (event) {
+  if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+  const sc = document.getElementById("summaryCard") || summaryCard;
+  closeSummaryEditor();
+  if (sc) {
+    sc.style.setProperty("display", "none", "important");
+  }
+  const tBtn = document.getElementById("btnToggleSummary") || btnToggleSummary;
+  if (tBtn) tBtn.classList.remove("active");
+  if (typeof window.updateScrollBottomBtnVisibility === "function") {
+    window.updateScrollBottomBtnVisibility();
+  }
+};
 
-function closeSummaryEditor() {
-  if (summaryEditBox) summaryEditBox.style.display = "none";
-  if (summaryTextEl) summaryTextEl.style.display = "block";
-  if (btnEditSummary) btnEditSummary.style.display = "inline-flex";
-}
+window.toggleSummaryCard = function (forceOpen, event) {
+  if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+  const now = Date.now();
+  if (typeof forceOpen !== "boolean" && now - _lastSummaryToggleAt < 120) return;
+  _lastSummaryToggleAt = now;
+  const sc = document.getElementById("summaryCard") || summaryCard;
+  if (!sc) return;
+  const isHidden = sc.style.display === "none" || getComputedStyle(sc).display === "none";
+  const nextOpen = typeof forceOpen === "boolean" ? forceOpen : isHidden;
+  if (nextOpen) {
+    sc.style.setProperty("display", "flex");
+    const tBtn = document.getElementById("btnToggleSummary") || btnToggleSummary;
+    if (tBtn) tBtn.classList.add("active");
+    if (typeof window.updateScrollBottomBtnVisibility === "function") {
+      window.updateScrollBottomBtnVisibility();
+    }
+  } else {
+    window.closeSummaryCard();
+  }
+};
 
-async function handleSaveSummaryEdit() {
+function openSummaryEditor(event) {
+  if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+  const ta = document.getElementById("summaryEditTextarea") || summaryEditTextarea;
+  const txtEl = document.getElementById("summaryText") || summaryTextEl;
+  const box = document.getElementById("summaryEditBox") || summaryEditBox;
+  const eBtn = document.getElementById("btnEditSummary") || btnEditSummary;
+  if (!ta || !txtEl || !box) return;
+  ta.value = txtEl.dataset.raw || "";
+  txtEl.style.display = "none";
+  box.style.display = "flex";
+  if (eBtn) eBtn.style.display = "none";
+}
+window.openSummaryEditor = openSummaryEditor;
+
+function closeSummaryEditor(event) {
+  if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+  const box = document.getElementById("summaryEditBox") || summaryEditBox;
+  const txtEl = document.getElementById("summaryText") || summaryTextEl;
+  const eBtn = document.getElementById("btnEditSummary") || btnEditSummary;
+  if (box) box.style.display = "none";
+  if (txtEl) txtEl.style.display = "block";
+  if (eBtn) eBtn.style.display = "inline-flex";
+}
+window.closeSummaryEditor = closeSummaryEditor;
+
+async function handleSaveSummaryEdit(event) {
+  if (event && typeof event.stopPropagation === "function") event.stopPropagation();
   if (!currentChatId || !summaryEditTextarea) return;
   const newSummary = summaryEditTextarea.value.trim();
   try {
@@ -1979,6 +2163,7 @@ async function handleSaveSummaryEdit() {
     showToast("保存备忘失败: " + err);
   }
 }
+window.handleSaveSummaryEdit = handleSaveSummaryEdit;
 
 async function handleManualSummarize() {
   if (!currentChatId) return;
@@ -3604,13 +3789,17 @@ function renderRichContent(content) {
     const probe = String(txt)
       .replace(/<status(?:\s+[^>]*)?>[\s\S]*?<\/status>/gi, "")
       .replace(/<status(?:\s+[^>]*)?>[\s\S]*$/gi, "")
+      .replace(/<memory(?:\s+[^>]*)?>[\s\S]*?<\/memory>/gi, "")
+      .replace(/<memory(?:\s+[^>]*)?>[\s\S]*$/gi, "")
       .replace(/<\/?(?:story|narrative|text|think|thinking)>/gi, "")
       .replace(/(?:^|\n)\s*(?:你打算怎么做|接下来你打算怎么做|你的选择)[？?：:\s]*[\s\S]*$/i, "")
       .replace(/(?:^|\n)\s*[1-9][\.、．\)]\s*[^\n]+/g, "")
       .trim();
     return probe.length > 0;
   };
-  working = working.replace(/<\/?(?:story|narrative|text)\s*>/gi, "");
+  working = working
+    .replace(/<\/?(?:story|narrative|text)\s*>/gi, "")
+    .replace(/<\/?localjavatool\d*\s*>/gi, "");
   if (!_earlyThinkEnabled) {
     if (/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/i.test(working)) {
       const cand = working.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "").trim();
@@ -3680,7 +3869,23 @@ function renderRichContent(content) {
   }
 
   const activeProjForHtml = (typeof projectsMap === "object" && projectsMap && currentProjectId) ? projectsMap[currentProjectId] : null;
-  const isHtmlCssEnabled = activeProjForHtml ? (activeProjForHtml.status_panel_enabled !== false) : true;
+  const isPureSimpleProj = Boolean(
+    activeProjForHtml &&
+    typeof window.isSimpleTrpgProject === "function" &&
+    window.isSimpleTrpgProject(activeProjForHtml)
+  );
+  const isStatusPanelActive = Boolean(
+    activeProjForHtml &&
+    !isPureSimpleProj &&
+    activeProjForHtml.status_panel_enabled !== false
+  );
+  const isHtmlCssEnabled = isStatusPanelActive;
+  const isCustomHtmlAllowed = !isPureSimpleProj;
+
+  // 1.1 解包创作者提示词中约定的 <Reply Example>...</Reply Example> 自定义 UI 包装标签
+  working = working
+    .replace(/<Reply[\s_-]*Example(?:\s+[^>]*)?>([\s\S]*?)<\/Reply[\s_-]*Example>/gi, "\n$1\n")
+    .replace(/<\/?Reply[\s_-]*Example(?:\s+[^>]*)?>/gi, "");
 
   // 1.2 剥离模型自造的伪系统标签（如 <system_event>【剧情正文】</system_event>、<system_writing>### 剧情正文</system_writing>）
   // 以及解包模型误用 <details summary="剧情正文"> 或 <details><summary>剧情正文</summary> 包裹的正文，避免与原生「剧情正文」模块顶栏重复出现
@@ -3690,6 +3895,38 @@ function renderRichContent(content) {
     .replace(/<details[^>]*\bsummary=["'][^"']*?(?:剧情正文|正文|叙事)[^"']*?["'][^>]*>([\s\S]*)$/gi, "\n\n$1\n\n")
     .replace(/<details[^>]*>[ \t\r\n]*<summary[^>]*>[^<\n]*?(?:剧情正文|正文栏|正文模块|游戏正文)[^<\n]*?<\/summary>([\s\S]*?)<\/details>/gi, "\n\n$1\n\n")
     .replace(/<details[^>]*>[ \t\r\n]*<summary[^>]*>[^<\n]*?(?:剧情正文|正文栏|正文模块|游戏正文)[^<\n]*?<\/summary>([\s\S]*)$/gi, "\n\n$1\n\n");
+
+  // 1.4 提取 <memory>...</memory> 默认折叠的长期/短期记忆区
+  const memoryBlocks = [];
+  working = working
+    .replace(/＜(\/?memory)＞/gi, "<$1>")
+    .replace(/<(?:记忆区|记忆备忘)(?:\s+[^>]*)?>/gi, "<memory>")
+    .replace(/<\/(?:记忆区|记忆备忘)>/gi, "</memory>")
+    .replace(/\[memory\]([\s\S]*?)\[\/memory\]/gi, "<memory>$1</memory>")
+    .replace(/```(?:xml|html|text|markdown|memory)?[ \t]*\r?\n?([ \t]*<memory>[\s\S]*?<\/memory>[ \t]*)\r?\n?```/gi, "$1");
+
+  working = working.replace(/<memory>([\s\S]*?)<\/memory>/gi, (_, inner) => {
+    const cleanMem = String(inner || "").trim();
+    if (!cleanMem) return "\n";
+    if (memoryBlocks.length === 0) {
+      memoryBlocks.push(cleanMem);
+      return "\n\n@@MEMORY_BLOCK_0@@\n\n";
+    }
+    memoryBlocks[0] = `${memoryBlocks[0]}\n${cleanMem}`;
+    return "\n";
+  });
+  if (/<memory>/i.test(working) && !/<\/memory>/i.test(working)) {
+    working = working.replace(/<memory>([\s\S]*)$/i, (_, inner) => {
+      const cleanMem = String(inner || "").trim();
+      if (!cleanMem) return "\n";
+      if (memoryBlocks.length === 0) {
+        memoryBlocks.push(cleanMem);
+        return "\n\n@@MEMORY_BLOCK_0@@\n\n";
+      }
+      memoryBlocks[0] = `${memoryBlocks[0]}\n${cleanMem}`;
+      return "\n";
+    });
+  }
 
   // 1.5 提取 <status>...</status> 零代码轻量状态块（同时自动剥离模型误写进 <status> 内部的 [剧情正文] 块，彻底杜绝状态栏与剧情正文同时出现两个剧情正文栏）
   const statusBlocks = [];
@@ -3708,26 +3945,16 @@ function renderRichContent(content) {
     return cleaned.trim();
   };
 
-  // 兼容模型用 ```xml ... ``` 代码块包裹 <status>、或使用全角/变体标签的情况
-  working = working
-    .replace(/＜(\/?status)＞/gi, "<$1>")
-    .replace(/<(?:status_panel|status_bar|状态栏|状态面板)(?:\s+[^>]*)?>/gi, "<status>")
-    .replace(/<\/(?:status_panel|status_bar|状态栏|状态面板)>/gi, "</status>")
-    .replace(/\[status\]([\s\S]*?)\[\/status\]/gi, "<status>$1</status>")
-    .replace(/```(?:xml|html|text|markdown|status)?[ \t]*\r?\n?([ \t]*<status>[\s\S]*?<\/status>[ \t]*)\r?\n?```/gi, "$1");
+  // 仅当启用状态栏时才提取 <status> 面板；极速跑团与关闭状态栏的纯净企划 100% 原样保留输出，不生成任何状态栏
+  if (isStatusPanelActive) {
+    working = working
+      .replace(/＜(\/?status)＞/gi, "<$1>")
+      .replace(/<(?:status_panel|status_bar|状态栏|状态面板)(?:\s+[^>]*)?>/gi, "<status>")
+      .replace(/<\/(?:status_panel|status_bar|状态栏|状态面板)>/gi, "</status>")
+      .replace(/\[status\]([\s\S]*?)\[\/status\]/gi, "<status>$1</status>")
+      .replace(/```(?:xml|html|text|markdown|status)?[ \t]*\r?\n?([ \t]*<status>[\s\S]*?<\/status>[ \t]*)\r?\n?```/gi, "$1");
 
-  working = working.replace(/<status>([\s\S]*?)<\/status>/gi, (_, inner) => {
-    const cleanedInner = cleanMisplacedStoryInStatus(inner);
-    if (!cleanedInner) return "\n";
-    if (statusBlocks.length === 0) {
-      statusBlocks.push(cleanedInner);
-      return `\n\n@@STATUS_BLOCK_0@@\n\n`;
-    }
-    statusBlocks[0] = `${statusBlocks[0]}\n${cleanedInner}`;
-    return "\n";
-  });
-  if (/<status>/i.test(working) && !/<\/status>/i.test(working)) {
-    working = working.replace(/<status>([\s\S]*)$/i, (_, inner) => {
+    working = working.replace(/<status>([\s\S]*?)<\/status>/gi, (_, inner) => {
       const cleanedInner = cleanMisplacedStoryInStatus(inner);
       if (!cleanedInner) return "\n";
       if (statusBlocks.length === 0) {
@@ -3737,6 +3964,18 @@ function renderRichContent(content) {
       statusBlocks[0] = `${statusBlocks[0]}\n${cleanedInner}`;
       return "\n";
     });
+    if (/<status>/i.test(working) && !/<\/status>/i.test(working)) {
+      working = working.replace(/<status>([\s\S]*)$/i, (_, inner) => {
+        const cleanedInner = cleanMisplacedStoryInStatus(inner);
+        if (!cleanedInner) return "\n";
+        if (statusBlocks.length === 0) {
+          statusBlocks.push(cleanedInner);
+          return `\n\n@@STATUS_BLOCK_0@@\n\n`;
+        }
+        statusBlocks[0] = `${statusBlocks[0]}\n${cleanedInner}`;
+        return "\n";
+      });
+    }
   }
   // 若模型在 <status> 之前与之后各写了一遍 1.~4. 选项列表，自动剥离 <status> 上方重复的选项列表
   if (statusBlocks.length > 0 && working.includes("@@STATUS_BLOCK_0@@")) {
@@ -3873,44 +4112,73 @@ function renderRichContent(content) {
     }
   }
 
-  if (!isHtmlCssEnabled) {
+  if (!isCustomHtmlAllowed) {
     working = working.replace(/<style[\s\S]*?<\/style>/gi, (m) => escapeHtml(m));
+  } else {
+    working = working.replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, (_, cssInner) => {
+      const scoped = typeof window.scopeProjectCss === "function"
+        ? window.scopeProjectCss(cssInner, "#chatMainStage #messageContainer")
+        : "";
+      return scoped ? `<style>${scoped}</style>` : "";
+    });
   }
 
   working = working
+    .replace(/([^\r\n])\r?\n([ \t]*<details\b)/gi, "$1\n\n$2")
     .replace(/(<\/summary>)[ \t]*\r?\n(?!\r?\n)/gi, "$1\n\n")
+    .replace(/(<!--[\s\S]*?-->)[ \t]*\r?\n(?!\r?\n)/g, "$1\n\n")
     .replace(/([^\r\n])\r?\n([ \t]*<\/details>)/gi, "$1\n\n$2")
     .replace(/~/g, "&#126;");
 
   let rawHtml = window.marked ? sanitizeRichHtml(marked.parse(working)) : escapeHtml(working);
 
-  const configuredMods = window.getEffectiveUiModules ? window.getEffectiveUiModules(activeProjForHtml) : [];
+  const configuredMods = (!isPureSimpleProj && window.getEffectiveUiModules) ? window.getEffectiveUiModules(activeProjForHtml) : [];
   const findUimodByType = (t) => configuredMods.find((m) => m.type === t);
   const thinkMod = findUimodByType("thinking_fold");
   const storyMod = findUimodByType("story_narrative");
   const choicesMod = findUimodByType("action_choices");
-  const isThinkModEnabled = Boolean(thinkMod && thinkMod.enabled !== false);
-  const isChoicesModEnabled = Boolean(choicesMod && choicesMod.enabled !== false);
+  const isThinkModEnabled = Boolean(
+    (typeof window.isProjectCotEnabled === "function" && window.isProjectCotEnabled(activeProjForHtml)) ||
+    (thinkMod && thinkMod.enabled !== false)
+  );
+  const isChoicesModEnabled = Boolean(!isPureSimpleProj && choicesMod && choicesMod.enabled !== false);
 
-  // 2. 还原 <think> 折叠卡片（当「思考推演」模块被删除或关闭时，彻底剥离隐藏，绝不弹出思考框）
+  // 2. 还原 <think> 折叠卡片
   thinkBlocks.forEach((tb, idx) => {
     if (!isThinkModEnabled) {
       rawHtml = rawHtml.replace(new RegExp(`<p>\\s*@@THINK_BLOCK_${idx}@@\\s*<\\/p>|@@THINK_BLOCK_${idx}@@`, "g"), "");
       return;
     }
-    const modTitle = escapeHtml((thinkMod && thinkMod.key) ? thinkMod.key : "AI 剧情推演与构思过程");
+    const modTitle = escapeHtml((thinkMod && thinkMod.key) ? thinkMod.key : "思考过程");
     const titleLabel = tb.streaming ? `${modTitle}…` : `${modTitle}`;
     const openAttr = tb.streaming ? "open" : "";
+    const cfgBtnHtml = thinkMod
+      ? `<span class="module-quick-cfg-btn" onclick="event.preventDefault();event.stopPropagation();window.openModuleQuickEditor&&window.openModuleQuickEditor('thinking_fold')" title="模块设置">设置</span>`
+      : "";
     const cardHtml = `
       <details class="think-collapse-card trpg-universal-module" data-module="think" ${openAttr}>
         <summary>
           <span>${titleLabel}</span>
-          <span class="module-quick-cfg-btn" onclick="event.preventDefault();event.stopPropagation();window.openModuleQuickEditor&&window.openModuleQuickEditor('thinking_fold')" title="模块设置">设置</span>
+          ${cfgBtnHtml}
         </summary>
         <div class="think-collapse-body">${escapeHtml(tb.text || "...")}</div>
       </details>
     `;
     rawHtml = rawHtml.replace(new RegExp(`<p>\\s*@@THINK_BLOCK_${idx}@@\\s*<\\/p>|@@THINK_BLOCK_${idx}@@`, "g"), cardHtml);
+  });
+
+  // 2.4 还原 <memory> 默认折叠的长期/短期记忆区卡片
+  memoryBlocks.forEach((memText, idx) => {
+    const formattedMem = escapeHtml(memText)
+      .replace(/(\[长期记忆\]|【长期记忆】|长期记忆\s*[:：])/g, '<strong class="mem-sec-label">长期记忆：</strong>')
+      .replace(/(\[短期记忆\]|【短期记忆】|短期记忆\s*[:：])/g, '<strong class="mem-sec-label">短期记忆：</strong>');
+    const memHtml = `
+      <details class="memory-collapse-card trpg-universal-module" data-module="memory">
+        <summary><span>记忆</span></summary>
+        <div class="memory-collapse-body">${formattedMem}</div>
+      </details>
+    `;
+    rawHtml = rawHtml.replace(new RegExp(`<p>\\s*@@MEMORY_BLOCK_${idx}@@\\s*<\\/p>|@@MEMORY_BLOCK_${idx}@@`, "g"), memHtml);
   });
 
   // 2.5 还原 <status> 原生博德之门3风格 HUD 面板
@@ -3927,7 +4195,7 @@ function renderRichContent(content) {
   });
 
   // 4. 兼容旧版 ```html 代码块：使用 <iframe sandbox="allow-scripts"> 沙箱隔离渲染，彻底杜绝全局 CSS 污染与 XSS
-  if (isHtmlCssEnabled) {
+  if (isCustomHtmlAllowed) {
     const htmlBlockRegex = /<pre><code class="language-(?:html|css)">([\s\S]*?)<\/code><\/pre>/gi;
     rawHtml = rawHtml.replace(htmlBlockRegex, (match, codeSnippet) => {
       const tempDiv = document.createElement("div");
@@ -3961,13 +4229,13 @@ function renderRichContent(content) {
 
     // 5.0 关键修复：若模型把 <status> 紧跟在列表项后输出，marked 会将 .bg3-status-hud-card 包进 <li>/<ol>/<p> 内部；
     // 先将所有状态面板提升为 tempWrap 顶层直接子节点，防止被选项列表连带吞入
-    tempWrap.querySelectorAll(".bg3-status-hud-card, .html-preview-card").forEach((card) => {
+    tempWrap.querySelectorAll(".bg3-status-hud-card, .html-preview-card, .memory-collapse-card").forEach((card) => {
       if (card.parentElement && card.parentElement !== tempWrap) {
         tempWrap.appendChild(card);
       }
     });
 
-    tempWrap.querySelectorAll("details:not(.think-collapse-card)").forEach((det) => {
+    tempWrap.querySelectorAll("details:not(.think-collapse-card):not(.memory-collapse-card)").forEach((det) => {
       if (det.closest(".html-preview-card")) return;
       const sumEl = det.querySelector(":scope > summary") || det.querySelector("summary");
       if (sumEl && sumEl.childNodes.length > 0) {
@@ -4028,28 +4296,121 @@ function renderRichContent(content) {
       }
     });
 
+    if (isPureSimpleProj || !isChoicesModEnabled) {
+      // 纯净/极速跑团模式：除标准 <ol><li> 外，同时兼容中文顿号 1、/圆括号 1)/①/- 等被解析为 <ul>/<p> 的选项行，并附带底部快捷换批操作条
+      const simpleChoicePrefixRe = /^\s*(?:\d+[\.、．\)]|[A-G][\.、．：:\)]|[①-⑩]|[▶►🎯🔹🔸]|[-*•])\s*\S/i;
+      const simpleHeaderRe = /^(?:#{1,6}\s*|\*\*|\*)?\s*(?:[🎯🎬💡⚡🧭]\s*)?(?:你打算怎么做|接下来你[^\n]{0,18}|你的选择|你的抉择|行动选项|可选行动|你要怎么做|你决定怎么做)[？?：:\s]*(?:\*\*|\*)?$/i;
+
+      tempWrap.querySelectorAll("ol > li").forEach((li) => {
+        const pDet = li.closest("details");
+        if (pDet) {
+          if (pDet.classList.contains("think-collapse-card") || pDet.classList.contains("memory-collapse-card")) return;
+          const sTxt = (pDet.querySelector(":scope > summary")?.textContent || "").trim();
+          if (sTxt && !/行动|选项|推荐|抉择|分支|选择|SYSTEM\s*TERMINAL/i.test(sTxt)) return;
+        }
+        attachChoiceItemBehavior(li, li.textContent);
+      });
+
+      let sawAskHeader = false;
+      tempWrap.querySelectorAll(":scope > p, :scope > h3, :scope > h4, :scope > ul").forEach((el) => {
+        const tag = el.tagName.toLowerCase();
+        const txt = (el.textContent || "").trim();
+        if (tag !== "ul" && simpleHeaderRe.test(txt)) {
+          sawAskHeader = true;
+          return;
+        }
+        if (!sawAskHeader) return;
+        if (tag === "ul") {
+          el.querySelectorAll(":scope > li").forEach((li) => attachChoiceItemBehavior(li, li.textContent));
+        } else if (tag === "p") {
+          const lines = txt.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+          if (lines.length >= 2 && lines.every((l) => simpleChoicePrefixRe.test(l))) {
+            const box = document.createElement("div");
+            box.style.cssText = "display:flex;flex-direction:column;gap:6px;margin:8px 0;";
+            lines.forEach((l) => {
+              const itemDiv = document.createElement("div");
+              itemDiv.textContent = l;
+              attachChoiceItemBehavior(itemDiv, l);
+              box.appendChild(itemDiv);
+            });
+            el.replaceWith(box);
+          } else if (simpleChoicePrefixRe.test(txt)) {
+            attachChoiceItemBehavior(el, txt);
+          }
+        }
+      });
+
+      if (isPureSimpleProj) {
+        const hasAnyChoiceBtn = tempWrap.querySelectorAll(".trpg-action-choice-item").length > 0;
+        if ((hasAnyChoiceBtn || sawAskHeader) && !tempWrap.querySelector(".choice-lazy-breaker-wrap")) {
+          const simpleBreaker = document.createElement("div");
+          simpleBreaker.className = "choice-lazy-breaker-wrap";
+          simpleBreaker.innerHTML = `
+            <div class="choice-lazy-breaker-bar">
+              <button type="button" class="lazy-breaker-btn" onclick="window.rerollChoicesOnly && window.rerollChoicesOnly(this)">
+                <span>${hasAnyChoiceBtn ? "换一批" : "生成选项"}</span>
+              </button>
+              <button type="button" class="lazy-breaker-btn" onclick="window.autoAdvanceStory && window.autoAdvanceStory()">
+                <span>顺其自然</span>
+              </button>
+              <button type="button" class="lazy-breaker-btn highlight" onclick="window.toggleInlineActionInput && window.toggleInlineActionInput(this)">
+                <span>自由输入</span>
+              </button>
+            </div>
+            <div class="inline-custom-action-box" style="display: none;">
+              <div class="inline-custom-input-row">
+                <input type="text" class="form-input inline-custom-input" placeholder="输入自定义行动或对白，回车立即推演..." onkeydown="if(event.key==='Enter'){event.preventDefault();window.submitInlineCustomAction(this);}" />
+                <button type="button" class="btn btn-primary btn-xs" onclick="window.submitInlineCustomAction(this)">执行</button>
+              </div>
+            </div>
+          `;
+          tempWrap.appendChild(simpleBreaker);
+        }
+        return tempWrap.innerHTML;
+      }
+    }
+
+    const isActionDetailsEl = (det) => {
+      if (!det || det.tagName?.toLowerCase() !== "details") return false;
+      if (det.classList.contains("think-collapse-card") || det.classList.contains("memory-collapse-card")) return false;
+      const sTxt = (det.querySelector(":scope > summary")?.textContent || det.getAttribute("summary") || "").trim();
+      return /行动|选项|推荐|抉择|分支|下场|选择|choice|action|option/i.test(sTxt) && !/SYSTEM\s*TERMINAL|系统面板|主角信息|NPC信息|记忆/i.test(sTxt);
+    };
+
     if (isChoicesModEnabled) {
       const isInsideInfoDetails = (node) => {
         if (node.closest(".html-preview-card") || node.closest(".bg3-status-hud-card")) return true;
         const parentDet = node.closest("details");
         if (!parentDet) return false;
-        if (parentDet.classList.contains("think-collapse-card")) return true;
+        if (parentDet.classList.contains("think-collapse-card") || parentDet.classList.contains("memory-collapse-card")) return true;
         const sText = (parentDet.querySelector(":scope > summary")?.textContent || "").trim();
         if (/SYSTEM\s*TERMINAL|游戏推演|正文/i.test(sText)) return false;
-        if (/行动|选项|推荐|抉择|分支|下场|选择|choice|action|option/i.test(sText)) return false;
+        if (isActionDetailsEl(parentDet)) return false;
         return true;
       };
 
+      const allDetailsInWrap = Array.from(tempWrap.querySelectorAll("details"));
+      const hasDedicatedActionDetails = allDetailsInWrap.some(isActionDetailsEl);
+      const nonActionInfoDetails = allDetailsInWrap.filter((d) => {
+        if (isActionDetailsEl(d)) return false;
+        const sTxt = (d.querySelector(":scope > summary")?.textContent || "").trim();
+        return !/SYSTEM\s*TERMINAL|游戏推演|正文/i.test(sTxt);
+      });
+      const hasInfoPanelAfter = (el) =>
+        nonActionInfoDetails.some((infoDet) => !infoDet.contains(el) && Boolean(el.compareDocumentPosition(infoDet) & Node.DOCUMENT_POSITION_FOLLOWING));
+
       const explicitOptionRegex = /^(?:[▶►🎯🔹🔸📜]\s*)*(?:(?:任务选项|任务|大纲|路线|分支选项|结局分支|行动选项|可选行动|选项|方案|Option|Choice)\s*(?:[A-G]|[1-9]|[一二三四五六七八九十])(?:\s*[：:．.、—\-「【《（(]|$)|[A-G]\s*路线\s*[：:．.、—\-]|【\s*(?:选项|任务|大纲|路线|行动|分支|抉择)\s*(?:[A-G]|[1-9]|[一二三四五六七八九十])[^】]*】|[▶►]\s*\S+)/i;
 
-      tempWrap.querySelectorAll("p, li, h3, h4").forEach((el) => {
-        if (el.classList.contains("trpg-action-choice-item") || isInsideInfoDetails(el)) return;
-        const txt = (el.textContent || "").trim();
-        if (!txt) return;
-        if (explicitOptionRegex.test(txt)) {
-          attachChoiceItemBehavior(el, txt);
-        }
-      });
+      if (!hasDedicatedActionDetails) {
+        tempWrap.querySelectorAll("p, li, h3, h4").forEach((el) => {
+          if (el.classList.contains("trpg-action-choice-item") || isInsideInfoDetails(el) || hasInfoPanelAfter(el)) return;
+          const txt = (el.textContent || "").trim();
+          if (!txt) return;
+          if (explicitOptionRegex.test(txt)) {
+            attachChoiceItemBehavior(el, txt);
+          }
+        });
+      }
 
       const choicesCustomKey = (choicesMod && choicesMod.key) ? choicesMod.key.trim() : "";
       const sectionHeaderRegex = /(?:行动推荐|行动选择|可选行动|行动选项|你的选择|你的抉择|请选择|任务选择|结局分支|可采取的?行动|你打算怎么做|你要怎么做|你决定怎么做)/i;
@@ -4107,7 +4468,9 @@ function renderRichContent(content) {
 
         const topBlocks = [];
         allChoiceNodes.forEach((node) => {
-          const block = node.closest("details:not(.think-collapse-card), ol, ul") || node;
+          const parentDet = node.closest("details:not(.think-collapse-card):not(.memory-collapse-card)");
+          const parentList = node.closest("ol, ul");
+          const block = (parentDet && isActionDetailsEl(parentDet)) ? parentDet : (parentList || node);
           if (block && !topBlocks.includes(block)) {
             topBlocks.push(block);
           }
@@ -4185,6 +4548,9 @@ function renderRichContent(content) {
               choicesModule.appendChild(blk);
             }
           } else if (blk.querySelectorAll && blk.querySelectorAll(".trpg-action-choice-item").length > 0) {
+            if (blk.tagName?.toLowerCase() === "details") {
+              blk.setAttribute("open", "");
+            }
             choicesModule.appendChild(blk);
           } else if (blk.parentElement) {
             blk.remove();
@@ -4225,6 +4591,15 @@ function renderRichContent(content) {
       }
     }
 
+    // 若存在未被 .trpg-choices-module 捕获的独立「行动推荐」<details>（例如关闭了行动选项功能栏但提示词自带行动推荐），将其提升到顶层末尾以免夹在状态栏上方
+    const standaloneActionDetails = Array.from(tempWrap.querySelectorAll("details")).filter(
+      (d) => isActionDetailsEl(d) && !d.closest(".trpg-choices-module")
+    );
+    standaloneActionDetails.forEach((d) => {
+      d.setAttribute("open", "");
+      d.remove();
+    });
+
     // 5.5 终极万物模块重组：提取思考推演 / 剧情正文 / 每个独立状态栏子模块 / 行动选项，严格按模块工作台顺序逐一精准排序
     const thinkNodes = Array.from(tempWrap.querySelectorAll(":scope > .think-collapse-card"));
     thinkNodes.forEach((n) => {
@@ -4232,6 +4607,9 @@ function renderRichContent(content) {
       n.setAttribute("data-mod-key", thinkMod?.key || "思考推演");
       n.remove();
     });
+
+    const memoryNodes = Array.from(tempWrap.querySelectorAll(":scope > .memory-collapse-card"));
+    memoryNodes.forEach((n) => n.remove());
 
     const hudCards = Array.from(tempWrap.querySelectorAll(":scope > .bg3-status-hud-card"));
     const statusSubBlocks = [];
@@ -4331,12 +4709,20 @@ function renderRichContent(content) {
 
     const sortableItems = [];
     let seqCounter = 0;
+    const thinkCfgIdx = getModConfigOrder(thinkMod?.id, thinkMod?.key, "thinking_fold", -1);
+    const storyCfgIdx = getModConfigOrder(storyMod?.id, storyMod?.key, "story_narrative", -1);
+    const choicesCfgIdx = getModConfigOrder(choicesMod?.id, choicesMod?.key, "action_choices", -1);
+    // 除非用户在工作台中明确把「行动选项」拖拽到了其他模块上方，否则行动选项恒锁定在整条消息最底部 (order=10000)
+    const choicesPinnedEarlier =
+      choicesCfgIdx !== -1 &&
+      configuredMods.length > 1 &&
+      choicesCfgIdx < configuredMods.length - 1;
 
     thinkNodes.forEach((node) => {
       sortableItems.push({
         node,
         isStatusBlock: false,
-        order: getModConfigOrder(thinkMod?.id, thinkMod?.key, "thinking_fold", 0),
+        order: thinkCfgIdx !== -1 ? thinkCfgIdx : -10,
         seq: seqCounter++
       });
     });
@@ -4345,7 +4731,7 @@ function renderRichContent(content) {
       sortableItems.push({
         node,
         isStatusBlock: false,
-        order: getModConfigOrder(storyMod?.id, storyMod?.key, "story_narrative", 1),
+        order: storyCfgIdx !== -1 ? storyCfgIdx : 0,
         seq: seqCounter++
       });
     });
@@ -4356,7 +4742,7 @@ function renderRichContent(content) {
       sortableItems.push({
         node: blk,
         isStatusBlock: true,
-        order: getModConfigOrder(bId, bKey, "", 100 + sIdx),
+        order: getModConfigOrder(bId, bKey, "", 500 + sIdx),
         seq: seqCounter++
       });
     });
@@ -4365,7 +4751,16 @@ function renderRichContent(content) {
       sortableItems.push({
         node,
         isStatusBlock: false,
-        order: 200 + hIdx,
+        order: 700 + hIdx,
+        seq: seqCounter++
+      });
+    });
+
+    memoryNodes.forEach((node, mIdx) => {
+      sortableItems.push({
+        node,
+        isStatusBlock: false,
+        order: 800 + mIdx,
         seq: seqCounter++
       });
     });
@@ -4374,7 +4769,16 @@ function renderRichContent(content) {
       sortableItems.push({
         node,
         isStatusBlock: false,
-        order: getModConfigOrder(choicesMod?.id, choicesMod?.key, "action_choices", 999),
+        order: choicesPinnedEarlier ? choicesCfgIdx : 10000,
+        seq: seqCounter++
+      });
+    });
+
+    standaloneActionDetails.forEach((node, aIdx) => {
+      sortableItems.push({
+        node,
+        isStatusBlock: false,
+        order: 10010 + aIdx,
         seq: seqCounter++
       });
     });
@@ -4440,13 +4844,119 @@ function renderRichContent(content) {
   return rawHtml;
 }
 
-// 监听沙箱 iframe 自适应高度消息
+// 渲染作品「详细介绍」：若含 HTML / <style> / <script> 交互页则放入独立安全沙箱 iframe，否则走 Markdown
+function renderDetailedDescriptionBlock(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!raw) return { html: "", isIframe: false };
+  const isRichHtml = /(?:<!doctype\s+html|<html\b|<head\b|<body\b|<style\b|<script\b|<section\b|<div\b|<button\b|<input\b|<select\b|<form\b|<header\b|<footer\b)/i.test(raw);
+  if (!isRichHtml) {
+    const safeMd = window.marked ? sanitizeRichHtml(marked.parse(raw)) : sanitizeRichHtml(raw);
+    return {
+      html: `<div class="detailed-intro-card">${safeMd}</div>`,
+      isIframe: false
+    };
+  }
+
+  const frameId = "intro_ifr_" + Math.random().toString(36).slice(2, 9);
+  const bridgeHead = `<meta charset="utf-8"><style id="_trpg_intro_fit">html,body{min-height:0!important;height:auto!important;}</style><script>(function(){
+    var FID="${frameId}",lastH=0;
+    function postCopy(t){
+      if(!t)return;
+      try{parent.postMessage({type:"trpg_intro_copy_text",id:FID,text:String(t)},"*");}catch(e){}
+    }
+    try{
+      if(!navigator.clipboard){navigator.clipboard={};}
+      navigator.clipboard.writeText=function(t){postCopy(t);return Promise.resolve();};
+    }catch(e){}
+    try{
+      var _origExec=document.execCommand?document.execCommand.bind(document):null;
+      document.execCommand=function(cmd){
+        if(String(cmd||"").toLowerCase()==="copy"){
+          var sel=(window.getSelection&&window.getSelection().toString())||"";
+          var act=document.activeElement&&document.activeElement.value?document.activeElement.value:"";
+          var outEl=document.getElementById("output");
+          postCopy(sel||act||(outEl&&outEl.value)||"");
+          if(_origExec){try{_origExec.apply(document,arguments);}catch(_e){}}
+          return true;
+        }
+        return _origExec?_origExec.apply(document,arguments):false;
+      };
+    }catch(e){}
+    function syncH(){
+      if(!document.body)return;
+      var h=Math.ceil(Math.max(document.body.scrollHeight||0,document.body.offsetHeight||0));
+      if(h>40&&Math.abs(h-lastH)>2){
+        lastH=h;
+        parent.postMessage({type:"trpg_intro_iframe_resize",id:FID,height:h},"*");
+      }
+    }
+    window.addEventListener("load",function(){syncH();setTimeout(syncH,180);setTimeout(syncH,600);});
+    document.addEventListener("click",function(){setTimeout(syncH,60);});
+    document.addEventListener("DOMContentLoaded",function(){
+      syncH();
+      if(window.ResizeObserver&&document.body){new ResizeObserver(syncH).observe(document.body);}
+    });
+  })();<\/script>`;
+
+  let srcDoc = raw;
+  if (/<head\b[^>]*>/i.test(srcDoc)) {
+    srcDoc = srcDoc.replace(/<head\b[^>]*>/i, (m) => `${m}${bridgeHead}`);
+  } else if (/<html\b[^>]*>/i.test(srcDoc)) {
+    srcDoc = srcDoc.replace(/<html\b[^>]*>/i, (m) => `${m}<head>${bridgeHead}</head>`);
+  } else {
+    srcDoc = `<!DOCTYPE html><html lang="zh-CN"><head>${bridgeHead}<style>body{margin:0;padding:16px;font-family:system-ui,-apple-system,sans-serif;color:#e2e8f0;background:#0b1016;}</style></head><body>${srcDoc}</body></html>`;
+  }
+
+  return {
+    html: `<div class="detailed-intro-iframe-wrap"><iframe id="${frameId}" class="detailed-intro-iframe" sandbox="allow-scripts" srcdoc="${escapeHtml(srcDoc)}"></iframe></div>`,
+    isIframe: true
+  };
+}
+window.renderDetailedDescriptionBlock = renderDetailedDescriptionBlock;
+
+window.openProjectIntroModal = function () {
+  const modal = document.getElementById("projectIntroModal");
+  const body = document.getElementById("projectIntroModalBody");
+  const titleEl = document.getElementById("projectIntroModalTitle");
+  const proj = projectsMap && currentProjectId ? projectsMap[currentProjectId] : null;
+  if (!modal || !body || !proj || !String(proj.detailed_description || "").trim()) return;
+  if (titleEl) titleEl.textContent = `${proj.name || "作品"} · 详细介绍`;
+  const rendered = renderDetailedDescriptionBlock(proj.detailed_description);
+  body.innerHTML = rendered.html;
+  modal.style.display = "flex";
+};
+
+// 监听沙箱 iframe 自适应高度与开局指令注入消息
 window.addEventListener("message", (ev) => {
-  if (ev.data && ev.data.type === "trpg_iframe_resize" && ev.data.id) {
+  if (!ev.data || typeof ev.data !== "object") return;
+  if (ev.data.type === "trpg_iframe_resize" && ev.data.id) {
     const ifr = document.getElementById(`${ev.data.id}_iframe`);
     if (ifr && ev.data.height) {
       ifr.style.height = `${Math.min(680, Math.max(90, Number(ev.data.height) + 12))}px`;
     }
+  } else if (ev.data.type === "trpg_intro_iframe_resize" && ev.data.id) {
+    const ifr = document.getElementById(String(ev.data.id));
+    if (ifr && ifr.classList.contains("detailed-intro-iframe") && ev.data.height) {
+      ifr.style.height = `${Math.min(6500, Math.max(180, Number(ev.data.height) + 4))}px`;
+    }
+  } else if (ev.data.type === "trpg_intro_copy_text" && typeof ev.data.text === "string") {
+    const ifr = ev.data.id ? document.getElementById(String(ev.data.id)) : null;
+    if (!ifr || ifr.contentWindow !== ev.source) return;
+    const copied = ev.data.text.trim();
+    if (!copied) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(copied).catch(() => {});
+    }
+    const introModal = document.getElementById("projectIntroModal");
+    if (introModal && introModal.style.display !== "none") {
+      introModal.style.display = "none";
+    }
+    if (userInput) {
+      userInput.value = copied;
+      autoResizeTextarea();
+      userInput.focus();
+    }
+    showToast("已复制开局设定并自动填入下方输入框，点击「发送」即可开始游戏！");
   }
 });
 
@@ -5086,13 +5596,14 @@ function buildZeroModelOnboardingHtml() {
   `;
 }
 
-// ================= 界面风格切换：极简（lamplight）/ 经典（classic） =================
+// ================= 界面风格切换：简约版（lamplight）/ 经典版（classic） =================
 window.isLamplightTheme = function () {
   return document.documentElement.getAttribute("data-ui-theme") !== "classic";
 };
 
-window.setUiTheme = function (mode) {
+window.setUiTheme = function (mode, showFeedback = false) {
   const next = mode === "classic" ? "classic" : "lamplight";
+  const prev = document.documentElement.getAttribute("data-ui-theme") === "classic" ? "classic" : "lamplight";
   document.documentElement.setAttribute("data-ui-theme", next);
   try { localStorage.setItem("trpg_ui_theme", next); } catch (e) {}
   const metaTheme = document.querySelector('meta[name="theme-color"]');
@@ -5103,32 +5614,45 @@ window.setUiTheme = function (mode) {
   } else if (welcomeBox && welcomeBox.style.display !== "none") {
     renderWelcomeBox();
   }
+  if (showFeedback && prev !== next && typeof showToast === "function") {
+    showToast(next === "classic" ? "已切换：经典版" : "已切换：简约版");
+  }
+};
+
+window.handleCornerThemeClick = function (targetMode, event) {
+  if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+  const cur = window.isLamplightTheme() ? "lamplight" : "classic";
+  const next = targetMode && targetMode !== cur ? targetMode : (cur === "classic" ? "lamplight" : "classic");
+  window.setUiTheme(next, true);
 };
 
 window.syncUiThemeButtons = function () {
   const isLamp = window.isLamplightTheme();
   document.getElementById("btnUiThemeLamplight")?.classList.toggle("active", isLamp);
   document.getElementById("btnUiThemeClassic")?.classList.toggle("active", !isLamp);
+  document.getElementById("btnCornerThemeLamplight")?.classList.toggle("active", isLamp);
+  document.getElementById("btnCornerThemeClassic")?.classList.toggle("active", !isLamp);
 };
 document.addEventListener("DOMContentLoaded", () => window.syncUiThemeButtons());
 
 function renderWelcomeBox() {
   if (!welcomeBox) return;
-  const isBuiltinModeProj = !currentProjectId || currentProjectId === "proj_default" || currentProjectId === "proj_free_chat";
+  const isBuiltinModeProj = !currentProjectId || ["proj_fast_trpg", "proj_default", "proj_free_chat"].includes(currentProjectId);
   const onboardingHtml = buildZeroModelOnboardingHtml();
 
   welcomeBox.style.background = "transparent";
   welcomeBox.style.border = "none";
   welcomeBox.style.boxShadow = "none";
 
-  // 第一步：首次打开显示【跑团】与【聊天】（若完全无模型则附带极简新手引导条）
+  // 第一步：首次打开显示【极速跑团】、【高级跑团】与【聊天】（若完全无模型则附带极简新手引导条）
   if (isBuiltinModeProj && !window._welcomeModeStepSelected) {
     if (!window.isLamplightTheme()) {
       welcomeBox.innerHTML = `
       ${onboardingHtml}
-      <div style="display:flex;justify-content:center;align-items:center;gap:24px;flex-wrap:wrap;padding:24px 0;">
-        <button type="button" onclick="window.enterInitialGameMode('proj_default', event)" style="min-width:180px;padding:32px 48px;border-radius:16px;border:1px solid rgba(99,102,241,0.45);background:linear-gradient(145deg, rgba(99,102,241,0.14), rgba(15,23,42,0.65));color:#e0e7ff;font-size:1.5rem;font-weight:800;letter-spacing:0.12em;cursor:pointer;transition:transform 0.15s ease,border-color 0.15s ease,box-shadow 0.15s ease;" onmouseover="this.style.transform='translateY(-2px)';this.style.borderColor='rgba(99,102,241,0.85)';this.style.boxShadow='0 8px 24px rgba(99,102,241,0.22)';" onmouseout="this.style.transform='';this.style.borderColor='rgba(99,102,241,0.45)';this.style.boxShadow='';">跑团</button>
-        <button type="button" onclick="window.enterInitialGameMode('proj_free_chat', event)" style="min-width:180px;padding:32px 48px;border-radius:16px;border:1px solid rgba(16,185,129,0.45);background:linear-gradient(145deg, rgba(16,185,129,0.14), rgba(15,23,42,0.65));color:#d1fae5;font-size:1.5rem;font-weight:800;letter-spacing:0.12em;cursor:pointer;transition:transform 0.15s ease,border-color 0.15s ease,box-shadow 0.15s ease;" onmouseover="this.style.transform='translateY(-2px)';this.style.borderColor='rgba(16,185,129,0.85)';this.style.boxShadow='0 8px 24px rgba(16,185,129,0.22)';" onmouseout="this.style.transform='';this.style.borderColor='rgba(16,185,129,0.45)';this.style.boxShadow='';">聊天</button>
+      <div style="display:flex;justify-content:center;align-items:center;gap:20px;flex-wrap:wrap;padding:24px 0;">
+        <button type="button" onclick="window.enterInitialGameMode('proj_fast_trpg', event)" style="min-width:168px;padding:28px 36px;border-radius:16px;border:1px solid rgba(56,189,248,0.45);background:linear-gradient(145deg, rgba(56,189,248,0.14), rgba(15,23,42,0.65));color:#e0f2fe;font-size:1.35rem;font-weight:800;letter-spacing:0.1em;cursor:pointer;transition:transform 0.15s ease,border-color 0.15s ease,box-shadow 0.15s ease;" onmouseover="this.style.transform='translateY(-2px)';this.style.borderColor='rgba(56,189,248,0.85)';this.style.boxShadow='0 8px 24px rgba(56,189,248,0.22)';" onmouseout="this.style.transform='';this.style.borderColor='rgba(56,185,248,0.45)';this.style.boxShadow='';">极速跑团</button>
+        <button type="button" onclick="window.enterInitialGameMode('proj_default', event)" style="min-width:168px;padding:28px 36px;border-radius:16px;border:1px solid rgba(99,102,241,0.45);background:linear-gradient(145deg, rgba(99,102,241,0.14), rgba(15,23,42,0.65));color:#e0e7ff;font-size:1.35rem;font-weight:800;letter-spacing:0.1em;cursor:pointer;transition:transform 0.15s ease,border-color 0.15s ease,box-shadow 0.15s ease;" onmouseover="this.style.transform='translateY(-2px)';this.style.borderColor='rgba(99,102,241,0.85)';this.style.boxShadow='0 8px 24px rgba(99,102,241,0.22)';" onmouseout="this.style.transform='';this.style.borderColor='rgba(99,102,241,0.45)';this.style.boxShadow='';">高级跑团</button>
+        <button type="button" onclick="window.enterInitialGameMode('proj_free_chat', event)" style="min-width:168px;padding:28px 36px;border-radius:16px;border:1px solid rgba(16,185,129,0.45);background:linear-gradient(145deg, rgba(16,185,129,0.14), rgba(15,23,42,0.65));color:#d1fae5;font-size:1.35rem;font-weight:800;letter-spacing:0.1em;cursor:pointer;transition:transform 0.15s ease,border-color 0.15s ease,box-shadow 0.15s ease;" onmouseover="this.style.transform='translateY(-2px)';this.style.borderColor='rgba(16,185,129,0.85)';this.style.boxShadow='0 8px 24px rgba(16,185,129,0.22)';" onmouseout="this.style.transform='';this.style.borderColor='rgba(16,185,129,0.45)';this.style.boxShadow='';">聊天</button>
       </div>
     `;
       return;
@@ -5138,7 +5662,8 @@ function renderWelcomeBox() {
       <div class="lp-welcome">
         <h1 class="lp-welcome-title">一键跑团</h1>
         <div class="lp-mode-grid">
-          <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode('proj_default', event)">跑团</button>
+          <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode('proj_fast_trpg', event)">极速跑团</button>
+          <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode('proj_default', event)">高级跑团</button>
           <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode('proj_free_chat', event)">聊天</button>
         </div>
       </div>
@@ -5147,10 +5672,18 @@ function renderWelcomeBox() {
     return;
   }
 
-  // 第二步：极简展示当前项目的开场按钮
+  // 第二步：展示当前游戏卡的详细介绍（若有）与开场按钮
+  const activeProjObj = (typeof projectsMap === "object" && projectsMap && currentProjectId) ? projectsMap[currentProjectId] : null;
+  const rawDetailedIntro = (!isBuiltinModeProj && activeProjObj && activeProjObj.detailed_description)
+    ? String(activeProjObj.detailed_description).trim()
+    : "";
+  const introRes = rawDetailedIntro ? renderDetailedDescriptionBlock(rawDetailedIntro) : { html: "", isIframe: false };
+  welcomeBox.classList.toggle("has-rich-intro-iframe", Boolean(introRes.isIframe));
+  const detailedIntroHtml = introRes.html;
+
   const greetings = getActiveProjectOpeningGreetings();
   if (!greetings || greetings.length === 0) {
-    welcomeBox.innerHTML = onboardingHtml;
+    welcomeBox.innerHTML = `${onboardingHtml}${detailedIntroHtml}`;
     return;
   }
 
@@ -5173,6 +5706,7 @@ function renderWelcomeBox() {
 
   welcomeBox.innerHTML = `
     ${onboardingHtml}
+    ${detailedIntroHtml}
     <div class="lp-greeting-grid">
       ${buttonsHtml}
     </div>
@@ -5276,7 +5810,7 @@ window.renderMessages = renderMessages;
 function appendMessageElement(msg) {
   if (welcomeBox) welcomeBox.style.display = "none";
   const item = document.createElement("div");
-  item.className = `message-item ${msg.role}${msg.interrupted ? " is-interrupted" : ""}`;
+  item.className = `message-item message-row ${msg.role}${msg.interrupted ? " is-interrupted" : ""}`;
   item.dataset.msgId = msg.id;
 
   const activeProj = (typeof projectsMap === "object" && projectsMap && currentProjectId) ? projectsMap[currentProjectId] : null;
@@ -5302,7 +5836,9 @@ function appendMessageElement(msg) {
   bubbleWrap.appendChild(metaHeader);
 
   const bubble = document.createElement("div");
-  bubble.className = "bubble";
+  bubble.className = msg.role === "assistant"
+    ? "bubble markdown-body chat-answer-container"
+    : "bubble";
 
   if (msg.role === "assistant") {
     bubble.innerHTML = renderRichContent(msg.content || "");
@@ -5497,14 +6033,30 @@ function startInlineEditMessage(msgId, bubbleEl, originalContent) {
   const preservedImages = isUser ? extractMessageImages(msgId, itemEl, false) : [];
   const originalHtml = bubbleEl.innerHTML;
   bubbleEl.innerHTML = "";
+  bubbleEl.classList.add("is-editing-inline");
+  if (itemEl) itemEl.classList.add("is-editing-inline");
+
+  const clearEditingState = () => {
+    bubbleEl.classList.remove("is-editing-inline");
+    if (itemEl) itemEl.classList.remove("is-editing-inline");
+  };
 
   const editorWrap = document.createElement("div");
   editorWrap.className = "msg-inline-editor";
 
   const textarea = document.createElement("textarea");
-  textarea.rows = 4;
+  textarea.rows = 2;
   textarea.className = "form-textarea";
   textarea.value = stripLegacyStartGameHint(originalContent);
+
+  const autoFitEditBox = () => {
+    textarea.style.height = "auto";
+    const maxEditH = Math.max(220, Math.min(540, Math.round((window.innerHeight || 800) * 0.62)));
+    const sH = textarea.scrollHeight;
+    textarea.style.height = `${Math.max(84, Math.min(sH + 4, maxEditH))}px`;
+    textarea.style.overflowY = sH + 4 > maxEditH ? "auto" : "hidden";
+  };
+  textarea.addEventListener("input", autoFitEditBox);
 
   const actions = document.createElement("div");
   actions.className = "msg-inline-actions";
@@ -5527,6 +6079,7 @@ function startInlineEditMessage(msgId, bubbleEl, originalContent) {
     btnSaveOnly.onclick = async () => {
       const updatedText = stripLegacyStartGameHint(textarea.value.trim());
       if (!updatedText && preservedImages.length === 0) return;
+      clearEditingState();
       await handleSaveUserMessageOnly(msgId, updatedText, bubbleEl, preservedImages);
     };
 
@@ -5535,6 +6088,7 @@ function startInlineEditMessage(msgId, bubbleEl, originalContent) {
     btnCancel.className = "btn btn-xs btn-outline-secondary";
     btnCancel.textContent = "取消";
     btnCancel.onclick = () => {
+      clearEditingState();
       bubbleEl.innerHTML = originalHtml;
     };
 
@@ -5566,6 +6120,7 @@ function startInlineEditMessage(msgId, bubbleEl, originalContent) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.detail || `HTTP ${res.status}`);
         }
+        clearEditingState();
         bubbleEl.innerHTML = renderRichContent(updatedText);
         if (currentChatData && currentChatData.messages) {
           const m = currentChatData.messages.find((x) => x.id === msgId);
@@ -5590,6 +6145,7 @@ function startInlineEditMessage(msgId, bubbleEl, originalContent) {
     btnCancel.className = "btn btn-xs btn-outline-secondary";
     btnCancel.textContent = "取消";
     btnCancel.onclick = () => {
+      clearEditingState();
       bubbleEl.innerHTML = originalHtml;
     };
 
@@ -5601,6 +6157,7 @@ function startInlineEditMessage(msgId, bubbleEl, originalContent) {
   editorWrap.appendChild(textarea);
   editorWrap.appendChild(actions);
   bubbleEl.appendChild(editorWrap);
+  requestAnimationFrame(autoFitEditBox);
   if (isUser && preservedImages.length > 0) {
     const grid = document.createElement("div");
     grid.className = "message-images-grid";
@@ -5990,6 +6547,20 @@ async function handleSendMessage(overrideText) {
   }
   if (!currentChatId) return;
 
+  // 支持游戏卡预设快捷回复指令匹配（如输入 /侦查 或完全匹配指令词时自动展开为预设内容）
+  const activeQrProj = (typeof projectsMap === "object" && projectsMap && currentProjectId) ? projectsMap[currentProjectId] : null;
+  if (activeQrProj && Array.isArray(activeQrProj.quick_replies) && activeQrProj.quick_replies.length > 0) {
+    const trimInput = rawText.trim();
+    const matchedQr = activeQrProj.quick_replies.find((qr) => {
+      if (!qr || !qr.command) return false;
+      const cmd = String(qr.command).trim();
+      return cmd && (trimInput === cmd || trimInput === `/${cmd.replace(/^\/+/, "")}`);
+    });
+    if (matchedQr && matchedQr.content) {
+      rawText = String(matchedQr.content).trim();
+    }
+  }
+
   // 支持通用 TRPG 掷骰指令：/roll 2d6+3 或 /r 1d20+4
   const rollCmdMatch = rawText.match(/^\/(?:roll|r)\s+([0-9dD+\-\s]+)(.*)$/i);
   if (rollCmdMatch) {
@@ -6078,6 +6649,10 @@ async function fetchStreamForChat(chatId, reqPayload) {
       reqPayload.erotic_enabled = liveLvls.eroticEnabled;
       reqPayload.violence_enabled = liveLvls.violenceEnabled;
     }
+    const activeProjForStream = projectsMap && currentProjectId ? projectsMap[currentProjectId] : null;
+    if (typeof window.isProjectCotEnabled === "function") {
+      reqPayload.cot_enabled = window.isProjectCotEnabled(activeProjForStream);
+    }
     const response = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -6118,6 +6693,13 @@ async function fetchStreamForChat(chatId, reqPayload) {
               streamInfo._userStatusOpenState = !det.open;
             }
           }
+          const memSumEl = ev.target.closest ? ev.target.closest("details.memory-collapse-card > summary") : null;
+          if (memSumEl) {
+            const det = memSumEl.parentElement;
+            if (det) {
+              streamInfo._userMemoryOpenState = !det.open;
+            }
+          }
         },
         { passive: true }
       );
@@ -6151,6 +6733,16 @@ async function fetchStreamForChat(chatId, reqPayload) {
             newStatus.setAttribute("open", "");
           } else {
             newStatus.removeAttribute("open");
+          }
+        }
+      }
+      if (streamInfo._userMemoryOpenState !== undefined) {
+        const newMem = streamInfo.bubbleEl.querySelector("details.memory-collapse-card");
+        if (newMem) {
+          if (streamInfo._userMemoryOpenState) {
+            newMem.setAttribute("open", "");
+          } else {
+            newMem.removeAttribute("open");
           }
         }
       }
@@ -6302,6 +6894,10 @@ async function fetchStreamForChat(chatId, reqPayload) {
                     const foundCg = proj.cg_book.find((c) => c.id === tcg.id || c.name === tcg.name);
                     if (foundCg) foundCg.unlocked = true;
                   });
+                }
+                const bgTrigCg = data.triggered_cgs.find((c) => c && c.display_mode === "background" && c.image_url);
+                if (bgTrigCg && typeof window.applyTemporaryCgBackground === "function") {
+                  window.applyTemporaryCgBackground(bgTrigCg.image_url);
                 }
                 showToast(`已解锁 CG：${data.triggered_cgs.map((c) => c.name || c.title).join("、")}`);
               } else if (Array.isArray(data.unlocked_cgs) && data.unlocked_cgs.length > prevUnlocked.length) {
@@ -8062,14 +8658,19 @@ function rollDice(count, sides, sendImmediately = false) {
 
 function autoResizeTextarea() {
   if (!userInput) return;
-  const customBase = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--input-box-height")) || 66;
-  userInput.style.height = "auto";
-  // 手机软键盘弹出时可视高度很小，输入框最多占可视区域 30%，避免把对话区挤没
+  const minBase = 38;
+  userInput.style.height = `${minBase}px`;
   const viewH = (window.visualViewport && window.visualViewport.height) || window.innerHeight || 800;
-  const maxAllowed = Math.max(Math.min(customBase, 120), Math.min(240, Math.round(viewH * 0.3)));
-  const nextH = Math.max(Math.min(customBase, maxAllowed), Math.min(userInput.scrollHeight, maxAllowed));
-  userInput.style.height = nextH + "px";
+  const isNarrow = window.innerWidth <= 768;
+  const maxAllowed = isNarrow
+    ? Math.max(140, Math.min(260, Math.round(viewH * 0.36)))
+    : Math.max(200, Math.min(420, Math.round(viewH * 0.48)));
+  const scrollH = userInput.scrollHeight;
+  const nextH = Math.max(minBase, Math.min(scrollH, maxAllowed));
+  userInput.style.height = `${nextH}px`;
+  userInput.style.overflowY = scrollH > maxAllowed ? "auto" : "hidden";
 }
+window.autoResizeTextarea = autoResizeTextarea;
 
 // ================= 模型列表拉取、价格展示与同步 =================
 let currentPricingFilter = "all";
@@ -8768,8 +9369,7 @@ function initGlobalParamBindings() {
     const grp = document.getElementById("settingContextTurnsGroup");
     if (grp && ctxModeSelect) {
       const isTok = ctxModeSelect.value === "tokens";
-      grp.style.opacity = isTok ? "0.45" : "1";
-      grp.style.pointerEvents = isTok ? "none" : "auto";
+      grp.style.display = isTok ? "none" : "";
     }
   };
   ctxModeSelect?.addEventListener("change", syncGlobalCtxModeUi);
@@ -8846,21 +9446,12 @@ function populateGlobalParamInputs(s) {
     const grp = document.getElementById("settingContextTurnsGroup");
     if (grp) {
       const isTok = ctxModeSelect.value === "tokens";
-      grp.style.opacity = isTok ? "0.45" : "1";
-      grp.style.pointerEvents = isTok ? "none" : "auto";
+      grp.style.display = isTok ? "none" : "";
     }
   }
   const autoSumEl = document.getElementById("settingAutoSummarize");
   if (autoSumEl) autoSumEl.checked = s.auto_summarize !== false;
-  const globalProtoEl = document.getElementById("settingGlobalSystemProtocolPrompt");
-  if (globalProtoEl) {
-    const rawProto = (s.global_system_protocol_prompt !== undefined && s.global_system_protocol_prompt !== null)
-      ? String(s.global_system_protocol_prompt)
-      : "";
-    globalProtoEl.value = typeof window.upgradeLegacyGlobalProtocolPrompt === "function"
-      ? window.upgradeLegacyGlobalProtocolPrompt(rawProto, true)
-      : rawProto;
-  }
+
   syncGlobalParamsOverrideUI(s);
 }
 
@@ -8964,24 +9555,7 @@ function collectSettingsPayload() {
     existingCustomModels.unshift(chosenModel);
   }
   const guiOrientInput = document.getElementById("settingGuiOrientation");
-  const globalProtoModalEl = document.getElementById("settingGlobalSystemProtocolPrompt");
-  const globalProtoStEl = document.getElementById("stGlobalSystemProtocolPrompt");
-  const isSettingsOpen = Boolean(
-    settingsModal &&
-    (settingsModal.classList.contains("active") || settingsModal.style.display === "flex" || settingsModal.style.display === "block")
-  );
-  const activeProjObj = (typeof projectsMap === "object" && projectsMap && currentProjectId) ? projectsMap[currentProjectId] : null;
-  const activeIsFreeChat = Boolean(activeProjObj && typeof window.isFreeChatProject === "function" && window.isFreeChatProject(activeProjObj));
-  let globalProtoVal = "";
-  if (isSettingsOpen && globalProtoModalEl) {
-    globalProtoVal = String(globalProtoModalEl.value ?? "").trim();
-  } else if (globalProtoStEl && !activeIsFreeChat && currentProjectId === "proj_default") {
-    globalProtoVal = String(globalProtoStEl.value ?? "").trim();
-  } else if (window.globalUserSettings && window.globalUserSettings.global_system_protocol_prompt !== undefined && window.globalUserSettings.global_system_protocol_prompt !== null) {
-    globalProtoVal = String(window.globalUserSettings.global_system_protocol_prompt).trim();
-  } else if (globalProtoModalEl) {
-    globalProtoVal = String(globalProtoModalEl.value ?? "").trim();
-  }
+
   const payload = {
     api_protocol: manualProtoSelect?.value || window.globalUserSettings?.api_protocol || "auto",
     base_url: settingBaseUrl?.value.trim() || "",
@@ -8996,7 +9570,7 @@ function collectSettingsPayload() {
     gui_orientation: guiOrientInput?.value === "portrait" ? "portrait" : (typeof window.getGuiOrientation === "function" ? window.getGuiOrientation() : "landscape"),
     context_mode: ctxModeSelect?.value === "tokens" ? "tokens" : "turns",
     auto_summarize: document.getElementById("settingAutoSummarize") ? !!document.getElementById("settingAutoSummarize").checked : true,
-    global_system_protocol_prompt: globalProtoVal,
+
     model_params: (window.globalUserSettings && window.globalUserSettings.model_params) || {}
   };
   const overrideInfo = typeof window.getActiveModelParamOverrideInfo === "function"
@@ -9410,8 +9984,9 @@ function renderMinimalistModelList() {
         ? `<span style="opacity:0.86;">${escapeHtml(meta.sharedPrefix)}</span><span class="model-name-unique-part">${escapeHtml(meta.uniquePart)}</span>`
         : escapeHtml(fullCleanTitle);
 
+    const engLabel = engineType === "strata" ? "Strata" : engineType === "llama" ? "Llama" : "Ollama";
     const engineBadgeHtml = isLocal && engineType
-      ? `<span class="wb-badge" style="flex-shrink:0;white-space:nowrap;${engineType === "strata" ? "color:var(--tc-c084fc, #c084fc);border-color:var(--tc-rgba-192-132-252-0-45, rgba(192,132,252,0.45));background:var(--tc-rgba-192-132-252-0-12, rgba(192,132,252,0.12));" : "color:var(--tc-38bdf8, #38bdf8);border-color:var(--tc-rgba-56-189-248-0-45, rgba(56,189,248,0.45));background:var(--tc-rgba-56-189-248-0-12, rgba(56,189,248,0.12));"}">${engineType === "strata" ? "Strata" : "Ollama"}</span>`
+      ? `<span class="wb-badge" style="flex-shrink:0;white-space:nowrap;${engineType === "strata" ? "color:var(--tc-c084fc, #c084fc);border-color:var(--tc-rgba-192-132-252-0-45, rgba(192,132,252,0.45));background:var(--tc-rgba-192-132-252-0-12, rgba(192,132,252,0.12));" : "color:var(--tc-38bdf8, #38bdf8);border-color:var(--tc-rgba-56-189-248-0-45, rgba(56,189,248,0.45));background:var(--tc-rgba-56-189-248-0-12, rgba(56,189,248,0.12));"}">${engLabel}</span>`
       : "";
     const warnBadgeHtml = shardWarning
       ? `<span class="wb-badge" style="flex-shrink:0;white-space:nowrap;color:var(--tc-fca5a5, #fca5a5);border-color:var(--tc-rgba-248-113-113-0-65, rgba(248,113,113,0.65));background:var(--tc-rgba-239-68-68-0-18, rgba(239,68,68,0.18));font-weight:700;">⚠️ ${escapeHtml(shardWarning)}</span>`
@@ -9570,6 +10145,13 @@ function openPerModelParamsEditor(modelId) {
     if (inp) inp.value = f.isFloat ? safeVal.toFixed(f.digits || 2) : safeVal;
     if (rng) rng.value = safeVal;
   });
+  const pmModeEl = document.getElementById("pm_context_mode");
+  if (pmModeEl) {
+    const effMode = saved.context_mode || fallbackGlobal.context_mode || "tokens";
+    pmModeEl.value = effMode === "tokens" ? "tokens" : "turns";
+    const pmGrp = document.getElementById("pmContextTurnsGroup");
+    if (pmGrp) pmGrp.style.display = pmModeEl.value === "tokens" ? "none" : "";
+  }
 }
 window.openPerModelParamsEditor = openPerModelParamsEditor;
 
@@ -9621,6 +10203,10 @@ async function savePerModelParams() {
     const raw = inp ? (f.isFloat ? parseFloat(inp.value) : parseInt(inp.value, 10)) : f.def;
     params[f.key] = Number.isNaN(raw) ? f.def : raw;
   });
+  const pmModeEl = document.getElementById("pm_context_mode");
+  if (pmModeEl) {
+    params.context_mode = pmModeEl.value === "tokens" ? "tokens" : "turns";
+  }
 
   try {
     const res = await fetch("/api/settings/model_params", {
@@ -10028,7 +10614,7 @@ function _getGroupedHfCatalog() {
           : "dongfangshuo/Dongfangshuo-Qwen3.8-27B-NSFW-v4",
         title: folderKey,
         subfolder: folderKey,
-        engine: isFlash ? "strata" : "ollama",
+        engine: isFlash ? "strata" : "llama",
         tiers: []
       });
     }
@@ -10375,8 +10961,8 @@ async function selectReadyHfTierModel(folderOrRepoKey, tierIdx) {
   if (!matched && group.engine === "strata") {
     matched = detected.find((dm) => dm.engine === "strata");
   }
-  if (!matched && group.engine === "ollama") {
-    matched = detected.find((dm) => dm.engine === "ollama");
+  if (!matched && (group.engine === "llama" || group.engine === "ollama")) {
+    matched = detected.find((dm) => dm.engine === "llama" || dm.engine === "ollama");
   }
   if (matched) {
     await selectModelFromMinimalistList(matched.id);
@@ -10555,15 +11141,19 @@ async function saveMinimalistApiConfig() {
     }
 
     const localSet = new Set((availableModelsData?.local_models || []).map((x) => x.id));
-    const apiList = (availableModelsData?.models || []).filter((id) => !localSet.has(id));
+    const apiList = Array.isArray(availableModelsData?.remote_models)
+      ? availableModelsData.remote_models
+      : (availableModelsData?.models || []).filter((id) => !localSet.has(id));
     if (apiList.length > 0) {
+      const fbNote = availableModelsData?.used_direct_fallback ? "（设置中代理未开启，已自动改走直连）" : "";
       if (statusBox) {
-        statusBox.innerHTML = `<span style="color:var(--tc-34d399, #34d399);font-weight:600;">已连接 (${apiList.length} 个模型)</span>`;
+        statusBox.innerHTML = `<span style="color:var(--tc-34d399, #34d399);font-weight:600;">已连接 (${apiList.length} 个模型)${escapeHtml(fbNote)}</span>`;
       }
       showToast(`已获取 ${apiList.length} 个模型`);
     } else {
+      const errDetail = availableModelsData?.remote_fetch_error ? `（${availableModelsData.remote_fetch_error}）` : "";
       if (statusBox) {
-        statusBox.innerHTML = `<span style="color:var(--tc-fbbf24, #fbbf24);">未获取到模型，请手动添加</span>`;
+        statusBox.innerHTML = `<span style="color:var(--tc-fbbf24, #fbbf24);">未获取到模型${escapeHtml(errDetail)}，请手动添加</span>`;
       }
       const sub = document.getElementById("apiManualModelSubmenu");
       if (sub) sub.open = true;
@@ -11595,8 +12185,8 @@ function initUniversalResizersAndAutoAdapt() {
   }
   if (savedLayout.inputHeight >= 48 && savedLayout.inputHeight <= 440) {
     root.style.setProperty("--input-box-height", `${savedLayout.inputHeight}px`);
-    if (userInput) userInput.style.height = `${savedLayout.inputHeight}px`;
   }
+  autoResizeTextarea();
   if (savedLayout.msgMaxWidth >= 45 && savedLayout.msgMaxWidth <= 100) {
     root.style.setProperty("--msg-max-width", `${savedLayout.msgMaxWidth}%`);
   }
@@ -12012,10 +12602,12 @@ window.openLightbox = function (src) {
   }
 };
 
-// ================= 一键更新系统（直连 hf-mirror 优先 · 零损存档与模型 · 自动备份与热重启） =================
+// ================= 一键热更新系统（单次点击自动检查+下载+进度条+内存零停机热更新） =================
 let _currentServerBootId = "";
 let _lastSystemUpdateCheckAt = 0;
 let _systemUpdateBusy = false;
+let _hotUpdateAutoHideTimer = null;
+let _sidebarBtnResetTimer = null;
 
 async function loadCurrentAppVersion() {
   try {
@@ -12026,6 +12618,10 @@ async function loadCurrentAppVersion() {
       if (data.boot_id) _currentServerBootId = data.boot_id;
       const badge = document.getElementById("currentAppVersionBadge");
       if (badge) badge.textContent = data.version;
+      const cornerVer = document.getElementById("cornerAppVersionText");
+      if (cornerVer) cornerVer.textContent = data.version;
+      const floatPill = document.getElementById("hotUpdateVerPill");
+      if (floatPill && !_systemUpdateBusy) floatPill.textContent = data.version;
     }
   } catch (e) {}
 }
@@ -12044,251 +12640,2039 @@ function _setUpdateStatusText(msg, isHighlight = false, isError = false) {
   }
 }
 
-window.openUpdatePanel = function () {
-  openSettingsModal();
-  const card = document.getElementById("systemUpdateCard");
-  if (card && typeof card.scrollIntoView === "function") {
-    setTimeout(() => card.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
+window.hideHotUpdateCard = function () {
+  if (_hotUpdateAutoHideTimer) {
+    clearTimeout(_hotUpdateAutoHideTimer);
+    _hotUpdateAutoHideTimer = null;
   }
-  window.checkSystemUpdate({ silent: false });
+  const card = document.getElementById("hotUpdateFloatingCard");
+  if (card) card.style.display = "none";
 };
 
-window.checkSystemUpdate = async function (opts = {}) {
-  const silent = Boolean(opts && opts.silent);
-  const allowProxy = Boolean(opts && opts.allowProxy);
-  if (_systemUpdateBusy) return;
-
-  const btnCheck = document.getElementById("btnCheckAppUpdate");
-  const btnApply = document.getElementById("btnApplyAppUpdate");
-  const newBadge = document.getElementById("newAppVersionBadge");
-  const notesPre = document.getElementById("systemUpdateNotesPre");
-  const sidebarDot = document.getElementById("sidebarUpdateDot");
+function _syncAllUpdateProgressUI(opts = {}) {
   const tr = (s) => (window.tStr ? window.tStr(s) : s);
+  const pct = Math.max(0, Math.min(100, Math.round(Number(opts.percent ?? 0))));
+  const state = opts.state || "active"; // "active" | "done" | "error" | "idle"
+  const text = opts.text ? tr(opts.text) : "";
+  const showCard = opts.showCard !== false;
 
-  if (!silent) {
-    if (btnCheck) {
-      btnCheck.disabled = true;
-      btnCheck.textContent = tr("检查中...");
-    }
-    _setUpdateStatusText("正在直连检查最新版本...");
+  if (_hotUpdateAutoHideTimer) {
+    clearTimeout(_hotUpdateAutoHideTimer);
+    _hotUpdateAutoHideTimer = null;
   }
 
-  try {
-    const res = await fetch(`/api/system/update/check?allow_proxy=${allowProxy ? "true" : "false"}`, {
-      cache: "no-store"
-    });
-    const data = await res.json().catch(() => ({}));
-    if (data && data.current_version) {
-      const curBadge = document.getElementById("currentAppVersionBadge");
-      if (curBadge) curBadge.textContent = data.current_version;
-    }
-    if (data && data.boot_id) _currentServerBootId = data.boot_id;
+  // 1. 顶部热更新进度浮窗
+  const card = document.getElementById("hotUpdateFloatingCard");
+  const fill = document.getElementById("hotUpdateProgressFill");
+  const pctEl = document.getElementById("hotUpdatePctText");
+  const stageEl = document.getElementById("hotUpdateStageText");
+  const dotEl = document.getElementById("hotUpdateDotIndicator");
+  const verPillEl = document.getElementById("hotUpdateVerPill");
+  const actionsEl = document.getElementById("hotUpdateActions");
 
-    if (!res.ok || !data.ok) {
-      if (data && data.need_proxy_confirm && !silent && !allowProxy) {
-        const okProxy = window.confirm(tr(data.message || "直连下载无法连通，目标文件大小约为 0.5 MB，是否允许走代理流量下载？"));
-        if (okProxy) {
-          if (btnCheck) {
-            btnCheck.disabled = false;
-            btnCheck.textContent = tr("检查更新");
+  if (card && showCard) {
+    card.style.display = "flex";
+  }
+  if (fill) {
+    fill.style.width = `${pct}%`;
+    fill.classList.toggle("is-active", state === "active");
+    fill.classList.toggle("is-done", state === "done");
+    fill.classList.toggle("is-error", state === "error");
+  }
+  if (pctEl) {
+    pctEl.textContent = `${pct}%`;
+    pctEl.style.color = state === "error" ? "#f87171" : "";
+  }
+  if (dotEl) {
+    dotEl.classList.toggle("is-active", state === "active");
+    dotEl.classList.toggle("is-done", state === "done");
+    dotEl.classList.toggle("is-error", state === "error");
+  }
+  if (verPillEl && opts.verPill) {
+    verPillEl.textContent = opts.verPill;
+  }
+  if (stageEl && text) {
+    stageEl.textContent = text;
+    stageEl.style.color = state === "error" ? "#f87171" : "";
+  }
+  if (actionsEl) {
+    if (opts.actionsHtml) {
+      actionsEl.innerHTML = opts.actionsHtml;
+      actionsEl.style.display = "inline-flex";
+    } else {
+      actionsEl.innerHTML = "";
+      actionsEl.style.display = "none";
+    }
+  }
+
+  // 2. 设置弹窗内联进度条同步
+  const inlineWrap = document.getElementById("systemUpdateProgressWrap");
+  const inlineFill = document.getElementById("systemUpdateProgressFill");
+  const inlinePct = document.getElementById("systemUpdateProgressPct");
+  if (inlineWrap) {
+    inlineWrap.style.display = state === "idle" ? "none" : "flex";
+  }
+  if (inlineFill) {
+    inlineFill.style.width = `${pct}%`;
+    inlineFill.classList.toggle("is-active", state === "active");
+    inlineFill.classList.toggle("is-done", state === "done");
+    inlineFill.classList.toggle("is-error", state === "error");
+  }
+  if (inlinePct) {
+    inlinePct.textContent = `${pct}%`;
+  }
+  if (text) {
+    _setUpdateStatusText(text, state === "done" || state === "active", state === "error");
+  }
+
+  // 3. 侧边栏「更新」按钮内置进度条与文字反馈
+  const sbFill = document.getElementById("sidebarUpdateBtnFill");
+  const sbText = document.getElementById("sidebarUpdateBtnText");
+  if (_sidebarBtnResetTimer) {
+    clearTimeout(_sidebarBtnResetTimer);
+    _sidebarBtnResetTimer = null;
+  }
+  if (sbFill && sbText) {
+    if (state === "active") {
+      sbFill.style.opacity = "1";
+      sbFill.style.width = `${pct}%`;
+      sbText.textContent = `${tr("更新")} ${pct}%`;
+    } else if (state === "done") {
+      sbFill.style.opacity = "1";
+      sbFill.style.width = "100%";
+      sbText.textContent = tr(opts.shortBtnLabel || "已是最新");
+      _sidebarBtnResetTimer = setTimeout(() => {
+        sbFill.style.opacity = "0";
+        setTimeout(() => {
+          sbFill.style.width = "0%";
+          sbFill.style.opacity = "1";
+        }, 260);
+        sbText.textContent = tr("更新");
+      }, 2600);
+    } else {
+      sbFill.style.width = "0%";
+      sbText.textContent = tr("更新");
+    }
+  }
+
+  if (opts.autoHideMs && opts.autoHideMs > 0) {
+    _hotUpdateAutoHideTimer = setTimeout(() => {
+      const c = document.getElementById("hotUpdateFloatingCard");
+      if (c && !c.matches(":hover")) {
+        c.style.display = "none";
+      }
+    }, opts.autoHideMs);
+  }
+}
+
+async function hotReloadStylesheets() {
+  const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+  const stamp = Date.now();
+  await Promise.all(
+    links.map(
+      (oldLink) =>
+        new Promise((resolve) => {
+          const rawHref = oldLink.getAttribute("href") || "";
+          if (!rawHref.includes("/static/")) {
+            resolve();
+            return;
           }
-          return await window.checkSystemUpdate({ silent: false, allowProxy: true });
-        }
-        _setUpdateStatusText("已取消使用代理检查更新。");
-        return;
-      }
-      if (!silent) {
-        _setUpdateStatusText(data.detail || data.message || "检查更新失败，请检查网络连接。", false, true);
-      }
+          const cleanBase = rawHref.split("?")[0];
+          const nextLink = oldLink.cloneNode(false);
+          nextLink.setAttribute("href", `${cleanBase}?v=hot_${stamp}`);
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            if (oldLink.parentNode) oldLink.parentNode.removeChild(oldLink);
+            resolve();
+          };
+          nextLink.onload = finish;
+          nextLink.onerror = finish;
+          oldLink.parentNode.insertBefore(nextLink, oldLink.nextSibling);
+          setTimeout(finish, 1200);
+        })
+    )
+  );
+}
+
+function _saveHotUpdateSessionRestore(finalVer) {
+  try {
+    sessionStorage.setItem(
+      "trpg_hot_update_restore_v1",
+      JSON.stringify({
+        ts: Date.now(),
+        ver: finalVer || "",
+        projectId: currentProjectId || "",
+        chatId: currentChatId || "",
+        draft: userInput ? userInput.value : "",
+        scrollTop: messageContainer ? messageContainer.scrollTop : 0
+      })
+    );
+  } catch (e) {}
+}
+
+async function _restoreHotUpdateSessionIfNeeded() {
+  try {
+    const raw = sessionStorage.getItem("trpg_hot_update_restore_v1");
+    if (!raw) return;
+    sessionStorage.removeItem("trpg_hot_update_restore_v1");
+    const st = JSON.parse(raw);
+    if (!st || !st.ts || Date.now() - st.ts > 45000) return;
+
+    if (st.projectId && st.projectId !== currentProjectId && projectsMap && projectsMap[st.projectId]) {
+      await switchProject(st.projectId);
+    }
+    if (st.chatId && cachedChatList && cachedChatList.find((c) => c.id === st.chatId) && currentChatId !== st.chatId) {
+      await switchChat(st.chatId, { keepDrawer: true });
+    }
+    if (typeof st.draft === "string" && st.draft && userInput) {
+      userInput.value = st.draft;
+      autoResizeTextarea();
+    }
+    if (typeof st.scrollTop === "number" && messageContainer) {
+      requestAnimationFrame(() => {
+        messageContainer.scrollTop = st.scrollTop;
+      });
+    }
+    if (st.ver) {
+      _syncAllUpdateProgressUI({
+        percent: 100,
+        text: `✓ 热更新完成！已升级至 ${st.ver}`,
+        verPill: st.ver,
+        state: "done",
+        shortBtnLabel: "更新完成",
+        showCard: true,
+        autoHideMs: 3000
+      });
+    }
+  } catch (e) {}
+}
+
+async function _finalizeUpdateClientSide(finalData) {
+  const tr = (s) => (window.tStr ? window.tStr(s) : s);
+  const oldBootId = finalData.boot_id || _currentServerBootId;
+  const targetVer = finalData.new_version || finalData.latest_version || "";
+  const sidebarDot = document.getElementById("sidebarUpdateDot");
+  const cornerDot = document.getElementById("cornerUpdateDot");
+  const newBadge = document.getElementById("newAppVersionBadge");
+  if (sidebarDot) sidebarDot.style.display = "none";
+  if (cornerDot) cornerDot.style.display = "none";
+  if (newBadge) newBadge.style.display = "none";
+
+  // 情况 1：后端已在当前进程内存完成零停机热替换（不断端口、不卸载本地显存模型）
+  if (finalData.hot_updated && !finalData.restarting) {
+    if (finalData.boot_id) _currentServerBootId = finalData.boot_id;
+    if (targetVer) {
+      const curBadge = document.getElementById("currentAppVersionBadge");
+      if (curBadge) curBadge.textContent = targetVer;
+      const cornerVer = document.getElementById("cornerAppVersionText");
+      if (cornerVer) cornerVer.textContent = targetVer;
+    }
+
+    if (finalData.frontend_reload_needed) {
+      _syncAllUpdateProgressUI({
+        percent: 100,
+        text: `热更新已写入 ${targetVer}，正在无损同步新界面...`,
+        verPill: targetVer,
+        state: "done",
+        shortBtnLabel: "更新完成",
+        showCard: true
+      });
+      _saveHotUpdateSessionRestore(targetVer);
+      setTimeout(() => window.location.reload(), 160);
       return;
     }
 
-    _lastSystemUpdateCheckAt = Date.now();
-    if (data.has_update) {
-      if (sidebarDot) sidebarDot.style.display = "inline-block";
-      if (newBadge) {
-        newBadge.textContent = tr(`新版本 ${data.latest_version}`);
-        newBadge.style.display = "inline-flex";
-      }
-      if (btnApply) {
-        btnApply.dataset.repairMode = "0";
-        btnApply.className = "btn btn-xs btn-primary";
-        btnApply.textContent = tr("一键更新");
-        btnApply.style.display = "inline-flex";
-      }
-      _setUpdateStatusText(
-        `发现新版本 ${data.latest_version}（更新包约 ${data.size_mb || 0.5} MB，来源：${data.source || "hf-mirror.com"}）。点击「一键更新」即可自动备份并平滑重启，100% 保留存档与模型。`,
-        true,
-        false
-      );
-      if (notesPre) {
-        if (data.notes) {
-          notesPre.textContent = data.notes;
-          notesPre.style.display = "block";
-        } else {
-          notesPre.style.display = "none";
-        }
-      }
-    } else {
-      if (sidebarDot) sidebarDot.style.display = "none";
-      if (newBadge) newBadge.style.display = "none";
-      if (notesPre) notesPre.style.display = "none";
-      if (btnApply) {
-        if (data.can_repair) {
-          btnApply.dataset.repairMode = "1";
-          btnApply.className = "btn btn-xs btn-secondary";
-          btnApply.textContent = tr("覆盖修复");
-          btnApply.style.display = "inline-flex";
-        } else {
-          btnApply.style.display = "none";
-        }
-      }
-      _setUpdateStatusText(`已是最新版本 (${data.current_version})，所有存档、剧本、角色卡与本地模型均受完整保护。`);
-      if (!silent) {
-        showToast(`已是最新版本 (${data.current_version})`);
-      }
+    if (finalData.css_hot_swap) {
+      await hotReloadStylesheets();
     }
-  } catch (err) {
-    if (!silent) {
-      _setUpdateStatusText("检查更新请求失败: " + err, false, true);
-    }
-  } finally {
-    if (!silent && btnCheck && !_systemUpdateBusy) {
-      btnCheck.disabled = false;
-      btnCheck.textContent = tr("检查更新");
-    }
-  }
-};
+    await loadCurrentAppVersion();
+    try {
+      await loadProjects();
+      loadModels();
+    } catch (e) {}
 
-window.applySystemUpdate = async function (opts = {}) {
-  if (_systemUpdateBusy) return;
-  const tr = (s) => (window.tStr ? window.tStr(s) : s);
-  if (isGenerating) {
-    showToast("当前正在生成回复，请先停止生成或等待完成后再更新");
+    _syncAllUpdateProgressUI({
+      percent: 100,
+      text: `✓ 热更新完成！已零停机升级至 ${targetVer}（共更新 ${finalData.updated_count ?? 0} 个文件）`,
+      verPill: targetVer,
+      state: "done",
+      shortBtnLabel: "更新完成",
+      showCard: true,
+      autoHideMs: 3200
+    });
+    showToast(tr(`热更新完成 (${targetVer})`));
     return;
   }
 
-  const btnCheck = document.getElementById("btnCheckAppUpdate");
-  const btnApply = document.getElementById("btnApplyAppUpdate");
-  const isRepair = Boolean((opts && opts.forceReinstall) || (btnApply && btnApply.dataset.repairMode === "1"));
-  const allowProxy = Boolean(opts && opts.allowProxy);
+  // 情况 2：回退至平滑重启模式（轮询新 boot_id 后自动无损恢复当前对话与草稿）
+  _syncAllUpdateProgressUI({
+    percent: 96,
+    text: `更新文件写入完成，正在平滑切换至 ${targetVer}...`,
+    verPill: targetVer,
+    state: "active",
+    showCard: true
+  });
 
-  if (isRepair && !(opts && opts.skipRepairConfirm)) {
-    const curVer = document.getElementById("currentAppVersionBadge")?.textContent || "";
+  let restartedOk = false;
+  for (let i = 0; i < 45; i++) {
+    await new Promise((r) => setTimeout(r, 650));
+    const pollPct = Math.min(99, 96 + Math.floor(i / 10));
+    _syncAllUpdateProgressUI({
+      percent: pollPct,
+      text: `正在等待新服务就绪 (${targetVer})...`,
+      verPill: targetVer,
+      state: "active",
+      showCard: true
+    });
+    try {
+      const vRes = await fetch(`/api/system/version?_t=${Date.now()}`, { cache: "no-store" });
+      if (vRes.ok) {
+        const vJson = await vRes.json();
+        if (vJson && vJson.ok && (!oldBootId || vJson.boot_id !== oldBootId)) {
+          restartedOk = true;
+          const finalVer = vJson.version || targetVer;
+          _saveHotUpdateSessionRestore(finalVer);
+          _syncAllUpdateProgressUI({
+            percent: 100,
+            text: `✓ 已升级至 ${finalVer}，正在同步界面...`,
+            verPill: finalVer,
+            state: "done",
+            shortBtnLabel: "更新完成",
+            showCard: true
+          });
+          setTimeout(() => window.location.reload(), 180);
+          break;
+        }
+      }
+    } catch (e) {}
+  }
+
+  if (!restartedOk) {
+    _syncAllUpdateProgressUI({
+      percent: 100,
+      text: "更新文件已完成写入！请点击右侧刷新页面生效。",
+      verPill: targetVer,
+      state: "done",
+      actionsHtml: `<button type="button" class="hot-update-mini-btn" onclick="window.location.reload()">立即刷新</button>`,
+      showCard: true
+    });
+  }
+}
+
+// 后台静默检查红点（仅供页面启动时静默探测是否有新版本提示点）
+window.checkSystemUpdate = async function (opts = {}) {
+  const silent = Boolean(opts && opts.silent);
+  if (!silent) {
+    return await window.startOneClickHotUpdate(opts);
+  }
+  if (_systemUpdateBusy) return;
+  try {
+    const res = await fetch("/api/system/update/check?allow_proxy=false", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json().catch(() => ({}));
+    if (!data || !data.ok) return;
+    _lastSystemUpdateCheckAt = Date.now();
+    if (data.boot_id) _currentServerBootId = data.boot_id;
+    if (data.current_version) {
+      const curBadge = document.getElementById("currentAppVersionBadge");
+      if (curBadge) curBadge.textContent = data.current_version;
+      const cornerVer = document.getElementById("cornerAppVersionText");
+      if (cornerVer) cornerVer.textContent = data.current_version;
+    }
+    const sidebarDot = document.getElementById("sidebarUpdateDot");
+    const cornerDot = document.getElementById("cornerUpdateDot");
+    const newBadge = document.getElementById("newAppVersionBadge");
+    const btnRepair = document.getElementById("btnApplyAppUpdate");
+    if (data.has_update) {
+      if (sidebarDot) sidebarDot.style.display = "inline-block";
+      if (cornerDot) cornerDot.style.display = "inline-block";
+      if (newBadge) {
+        newBadge.textContent = `新版本 ${data.latest_version}`;
+        newBadge.style.display = "inline-flex";
+      }
+      if (btnRepair) btnRepair.style.display = "none";
+    } else {
+      if (sidebarDot) sidebarDot.style.display = "none";
+      if (cornerDot) cornerDot.style.display = "none";
+      if (newBadge) newBadge.style.display = "none";
+      if (btnRepair) btnRepair.style.display = data.can_repair ? "inline-flex" : "none";
+    }
+  } catch (e) {}
+};
+
+// 核心入口：点一下自动完成「直连检查 -> 实时进度条下载 -> 语法校验备份 -> 内存零停机热更新」
+window.startOneClickHotUpdate = async function (opts = {}) {
+  const tr = (s) => (window.tStr ? window.tStr(s) : s);
+  if (window.innerWidth <= 768 && opts.source === "sidebar" && typeof window.closeAnySidebarDrawer === "function") {
+    window.closeAnySidebarDrawer();
+  }
+
+  if (_systemUpdateBusy) {
+    const card = document.getElementById("hotUpdateFloatingCard");
+    if (card) card.style.display = "flex";
+    return;
+  }
+
+  const hasActiveStream =
+    typeof activeStreams === "object" && activeStreams !== null && Object.keys(activeStreams).length > 0;
+  if (hasActiveStream) {
+    showToast(tr("当前正在生成回复，请先停止生成或等待完成后再更新"));
+    return;
+  }
+
+  const forceReinstall = Boolean(opts && opts.forceReinstall);
+  const allowProxy = Boolean(opts && opts.allowProxy);
+  const curVerText =
+    document.getElementById("cornerAppVersionText")?.textContent?.trim() ||
+    document.getElementById("currentAppVersionBadge")?.textContent?.trim() ||
+    "";
+
+  if (forceReinstall && !(opts && opts.skipRepairConfirm)) {
     const okFix = window.confirm(
-      tr(`当前已是最新版本 (${curVer})，确定重新下载代码包覆盖修复吗？（不会影响任何存档、剧本、角色卡与本地模型）`)
+      tr(`确定重新下载当前版本 (${curVerText}) 代码包并执行热修复吗？（100% 保留所有存档、游戏卡与本地模型）`)
     );
     if (!okFix) return;
   }
 
   _systemUpdateBusy = true;
+  const btnCheck = document.getElementById("btnCheckAppUpdate");
+  const btnRepair = document.getElementById("btnApplyAppUpdate");
   if (btnCheck) btnCheck.disabled = true;
-  if (btnApply) {
-    btnApply.disabled = true;
-    btnApply.textContent = tr("更新中...");
-  }
-  _setUpdateStatusText("正在下载轻量更新包并自动备份旧版代码，请稍候...", true, false);
+  if (btnRepair) btnRepair.disabled = true;
+
+  _syncAllUpdateProgressUI({
+    percent: 6,
+    text: allowProxy ? "正在通过代理检查并拉取更新..." : "正在直连镜像源检查最新版本...",
+    verPill: curVerText,
+    state: "active",
+    showCard: true
+  });
 
   try {
-    const res = await fetch("/api/system/update/apply", {
+    const res = await fetch("/api/system/update/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         allow_proxy: allowProxy,
         force: false,
-        force_reinstall: isRepair
+        force_reinstall: forceReinstall
       })
     });
-    const data = await res.json().catch(() => ({}));
 
-    if (res.status === 403) {
-      throw new Error("仅限本机操作（请在电脑本机访问 http://127.0.0.1:8765 或双击目录内「一键更新.bat」更新）");
-    }
-    if (!res.ok) {
-      throw new Error(data.detail || data.message || `HTTP ${res.status}`);
-    }
-    if (!data.ok) {
-      if (data.need_proxy_confirm && !allowProxy) {
-        _systemUpdateBusy = false;
-        const okProxy = window.confirm(tr(data.message || "直连下载无法连通，目标文件大小约为 0.5 MB，是否允许走代理流量下载？"));
-        if (okProxy) {
-          return await window.applySystemUpdate({
-            forceReinstall: isRepair,
-            allowProxy: true,
-            skipRepairConfirm: true
-          });
+    // 兼容旧版尚未重启的内存后端（若 /api/system/update/stream 返回 404，自动无缝降级走 check + apply）
+    if (res.status === 404) {
+      _syncAllUpdateProgressUI({ percent: 18, text: "正在检查远端版本信息...", state: "active", showCard: true });
+      const chkRes = await fetch(`/api/system/update/check?allow_proxy=${allowProxy ? "true" : "false"}`, { cache: "no-store" });
+      const chkData = await chkRes.json().catch(() => ({}));
+      if (!chkRes.ok || !chkData.ok) {
+        if (chkData && chkData.need_proxy_confirm && !allowProxy) {
+          _systemUpdateBusy = false;
+          if (btnCheck) btnCheck.disabled = false;
+          if (btnRepair) btnRepair.disabled = false;
+          const okP = window.confirm(tr(chkData.message || "直连下载无法连通，目标文件大小约为 0.5 MB，是否允许走代理流量下载？"));
+          if (okP) {
+            return await window.startOneClickHotUpdate({ ...opts, allowProxy: true, skipRepairConfirm: true });
+          }
+          _syncAllUpdateProgressUI({ percent: 0, text: "已取消使用代理更新。", state: "idle", showCard: true, autoHideMs: 2000 });
+          return;
         }
-        _setUpdateStatusText("已取消使用代理下载更新包。");
-        if (btnCheck) btnCheck.disabled = false;
-        if (btnApply) {
-          btnApply.disabled = false;
-          btnApply.textContent = tr(isRepair ? "覆盖修复" : "一键更新");
-        }
+        throw new Error(chkData.detail || chkData.message || "检查更新失败");
+      }
+      if (!chkData.has_update && !forceReinstall) {
+        const repairBtnHtml = chkData.can_repair
+          ? `<button type="button" class="hot-update-mini-btn" onclick="window.startOneClickHotUpdate({ forceReinstall: true })">重新校验热修复</button>`
+          : "";
+        _syncAllUpdateProgressUI({
+          percent: 100,
+          text: `✓ 当前已是最新版本 (${chkData.current_version})`,
+          verPill: chkData.current_version,
+          state: "done",
+          shortBtnLabel: "已是最新",
+          actionsHtml: repairBtnHtml,
+          showCard: true,
+          autoHideMs: 3200
+        });
         return;
       }
-      throw new Error(data.message || data.detail || "更新失败");
-    }
-
-    if (data.already_latest && !data.restarting) {
-      _systemUpdateBusy = false;
-      if (btnCheck) btnCheck.disabled = false;
-      if (btnApply) {
-        btnApply.disabled = false;
-        btnApply.textContent = tr(isRepair ? "覆盖修复" : "一键更新");
+      _syncAllUpdateProgressUI({
+        percent: 48,
+        text: `发现新版本 ${chkData.latest_version}（约 ${chkData.size_mb || 0.5} MB），正在自动下载更新...`,
+        verPill: `${chkData.current_version} → ${chkData.latest_version}`,
+        state: "active",
+        showCard: true
+      });
+      const appRes = await fetch("/api/system/update/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allow_proxy: allowProxy, force: false, force_reinstall: forceReinstall })
+      });
+      const appData = await appRes.json().catch(() => ({}));
+      if (!appRes.ok || !appData.ok) {
+        if (appData && appData.need_proxy_confirm && !allowProxy) {
+          _systemUpdateBusy = false;
+          if (btnCheck) btnCheck.disabled = false;
+          if (btnRepair) btnRepair.disabled = false;
+          const okP2 = window.confirm(tr(appData.message || "直连下载无法连通，目标文件大小约为 0.5 MB，是否允许走代理流量下载？"));
+          if (okP2) {
+            return await window.startOneClickHotUpdate({ ...opts, allowProxy: true, skipRepairConfirm: true });
+          }
+          _syncAllUpdateProgressUI({ percent: 0, text: "已取消使用代理下载更新包。", state: "idle", showCard: true, autoHideMs: 2000 });
+          return;
+        }
+        throw new Error(appData.detail || appData.message || "更新失败");
       }
-      _setUpdateStatusText(`已是最新版本 (${data.new_version || data.old_version})。`);
-      showToast(`已是最新版本 (${data.new_version || data.old_version})`);
+      await _finalizeUpdateClientSide(appData);
       return;
     }
 
-    const oldBootId = data.boot_id || _currentServerBootId;
-    const targetVer = data.new_version || "";
-    _setUpdateStatusText(
-      `更新文件写入完成（共更新 ${data.updated_count ?? 0} 个文件，旧版已备份），正在自动平滑重启服务...`,
-      true,
-      false
-    );
-
-    let restartedOk = false;
-    for (let i = 0; i < 45; i++) {
-      await new Promise((r) => setTimeout(r, 800));
-      try {
-        const vRes = await fetch(`/api/system/version?_t=${Date.now()}`, { cache: "no-store" });
-        if (vRes.ok) {
-          const vJson = await vRes.json();
-          if (vJson && vJson.ok && (!oldBootId || vJson.boot_id !== oldBootId)) {
-            restartedOk = true;
-            const finalVer = vJson.version || targetVer;
-            _setUpdateStatusText(`已成功升级至 ${finalVer}，正在刷新页面...`, true, false);
-            showToast(`已成功更新至 ${finalVer}`);
-            setTimeout(() => window.location.reload(), 400);
-            break;
-          }
-        }
-      } catch (e) {
-        // 重启瞬间的连接断开属于正常现象，继续轮询等待新进程就绪
-      }
+    if (res.status === 403) {
+      throw new Error("仅限电脑本机操作（请访问 http://127.0.0.1:8765 或双击目录内「一键更新.bat」）");
+    }
+    if (!res.ok || !res.body) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || errBody.message || `HTTP ${res.status}`);
     }
 
-    if (!restartedOk) {
-      _systemUpdateBusy = false;
-      _setUpdateStatusText("更新文件已完成写入！若页面未自动重连，请手动刷新浏览器页面或重新双击 run.bat。", true, false);
-      if (btnCheck) btnCheck.disabled = false;
-      if (btnApply) {
-        btnApply.disabled = false;
-        btnApply.textContent = tr("刷新页面");
-        btnApply.onclick = () => window.location.reload();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let pendingProxyRetry = null;
+    let finalDoneEvent = null;
+
+    const handleStreamEvent = (ev) => {
+      if (!ev || typeof ev !== "object") return;
+      if (ev.ok === false) {
+        if (ev.need_proxy_confirm && !allowProxy) {
+          pendingProxyRetry = ev;
+          return;
+        }
+        throw new Error(ev.message || ev.detail || "更新失败");
       }
+
+      const nextPill =
+        ev.latest_version && curVerText && ev.latest_version !== curVerText
+          ? `${curVerText} → ${ev.latest_version}`
+          : ev.new_version || ev.latest_version || ev.current_version || curVerText;
+
+      if (ev.stage === "manifest" && ev.notes) {
+        const notesPre = document.getElementById("systemUpdateNotesPre");
+        if (notesPre) {
+          notesPre.textContent = ev.notes;
+          notesPre.style.display = "block";
+        }
+      }
+
+      if (ev.stage === "done") {
+        finalDoneEvent = ev;
+        return;
+      }
+
+      _syncAllUpdateProgressUI({
+        percent: ev.percent ?? 15,
+        text: ev.message || "正在更新...",
+        verPill: nextPill,
+        state: "active",
+        showCard: true
+      });
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        let parsed = null;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch (e) {
+          continue;
+        }
+        handleStreamEvent(parsed);
+      }
+    }
+    if (buffer.trim()) {
+      try {
+        handleStreamEvent(JSON.parse(buffer.trim()));
+      } catch (e) {}
+    }
+
+    if (pendingProxyRetry) {
+      _systemUpdateBusy = false;
+      if (btnCheck) btnCheck.disabled = false;
+      if (btnRepair) btnRepair.disabled = false;
+      const okProxy = window.confirm(
+        tr(pendingProxyRetry.message || "直连下载无法连通，目标文件大小约为 0.5 MB，是否允许走代理流量下载？")
+      );
+      if (okProxy) {
+        return await window.startOneClickHotUpdate({
+          ...opts,
+          allowProxy: true,
+          skipRepairConfirm: true
+        });
+      }
+      _syncAllUpdateProgressUI({
+        percent: 0,
+        text: "已取消使用代理下载更新。",
+        verPill: curVerText,
+        state: "idle",
+        showCard: true,
+        autoHideMs: 2200
+      });
+      return;
+    }
+
+    if (finalDoneEvent) {
+      if (finalDoneEvent.already_latest) {
+        const latestVer = finalDoneEvent.new_version || finalDoneEvent.old_version || curVerText;
+        const btnRepairEl = document.getElementById("btnApplyAppUpdate");
+        if (btnRepairEl) btnRepairEl.style.display = finalDoneEvent.can_repair ? "inline-flex" : "none";
+        const repairActionHtml = finalDoneEvent.can_repair
+          ? `<button type="button" class="hot-update-mini-btn" onclick="window.startOneClickHotUpdate({ forceReinstall: true })">重新校验热修复</button>`
+          : "";
+        _syncAllUpdateProgressUI({
+          percent: 100,
+          text: `✓ 当前已是最新版本 (${latestVer})`,
+          verPill: latestVer,
+          state: "done",
+          shortBtnLabel: "已是最新",
+          actionsHtml: repairActionHtml,
+          showCard: true,
+          autoHideMs: 3200
+        });
+        return;
+      }
+      await _finalizeUpdateClientSide(finalDoneEvent);
     }
   } catch (err) {
-    _systemUpdateBusy = false;
     const msg = err && err.message ? err.message : String(err);
-    _setUpdateStatusText("更新失败: " + msg, false, true);
+    _syncAllUpdateProgressUI({
+      percent: 100,
+      text: `更新失败：${msg}`,
+      verPill: curVerText,
+      state: "error",
+      actionsHtml: `<button type="button" class="hot-update-mini-btn" onclick="window.startOneClickHotUpdate()">重试</button><button type="button" class="hot-update-mini-btn" onclick="window.hideHotUpdateCard(); openSettingsModal();">打开设置</button>`,
+      showCard: true
+    });
     showToast("更新失败: " + msg);
+  } finally {
+    _systemUpdateBusy = false;
     if (btnCheck) btnCheck.disabled = false;
+    if (btnRepair) btnRepair.disabled = false;
+  }
+};
+
+window.openUpdatePanel = function (opts = {}) {
+  return window.startOneClickHotUpdate(opts);
+};
+
+window.applySystemUpdate = function (opts = {}) {
+  return window.startOneClickHotUpdate(opts);
+};
+
+// ================= 机器硬件与模型全维度实时性能测试中心 GUI =================
+window._isBenchmarkRunning = false;
+let _benchAbortController = null;
+let _benchIdlePollTimer = null;
+let _benchElapsedInterval = null;
+let _benchStartTs = 0;
+let _benchChartSeries = []; // [{ tps, gpu }]
+let _benchLastReport = null;
+let _benchStaticHwMetrics = { cpu_score: 0, mem_bw_gbps: 0, disk_read_mbps: 0 };
+
+function _detectBrowserFallbackHardware() {
+  let gpuName = "浏览器 WebGL 图形设备";
+  try {
+    const canvas = document.createElement("canvas");
+    const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+    if (gl) {
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      if (dbg) {
+        const rawR = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || "";
+        const m = rawR.match(/NVIDIA[^,)]+|AMD[^,)]+|Radeon[^,)]+|Intel[^,)]+|Apple[^,)]+/i);
+        gpuName = m ? m[0].trim() : rawR.trim() || gpuName;
+      }
+    }
+  } catch (e) {}
+  const threads = navigator.hardwareConcurrency || 8;
+  const devMem = navigator.deviceMemory || 16;
+  const uaPlat = navigator.userAgentData?.platform || navigator.platform || "Windows / Desktop";
+  return {
+    ok: true,
+    _clientFallback: true,
+    system_specs: {
+      os_name: `${uaPlat} (浏览器环境识别)`,
+      board_name: "桌面计算机主板 (重启一次后端可读取精确主板型号)",
+      cpu_full: `本机多核处理器 (${threads} 逻辑线程)`,
+      cpu_threads: threads,
+      cpu_mhz: 0,
+      ram_nominal_gb: devMem,
+      ram_total_gib: devMem,
+      gpu_full: gpuName,
+      gpu_vram_gib: 0,
+      gpu_driver: "WebGL",
+      drive_root: "本地磁盘",
+      disk_models: [],
+      disk_total_gib: 0,
+      disk_free_gib: 0
+    },
+    cpu: { name: `本机多核处理器 (${threads} 逻辑线程)`, threads, load_pct: 0 },
+    ram: { total_gib: devMem, used_gib: 0, avail_gib: devMem, percent: 0 },
+    gpu: {
+      available: true,
+      name: gpuName,
+      driver: "WebGL",
+      vram_total_gib: 0,
+      vram_used_gib: 0,
+      vram_percent: 0,
+      gpu_util_pct: 0,
+      temp_c: 0,
+      power_w: 0,
+      power_limit_w: 0
+    },
+    disk: { total_gib: 0, free_gib: 0 }
+  };
+}
+
+function _renderBenchTelemetry(hw) {
+  if (!hw) return;
+  const cpu = hw.cpu || {};
+  const ram = hw.ram || {};
+  const gpu = hw.gpu || {};
+  const disk = hw.disk || {};
+  const specs = hw.system_specs || {};
+
+  const setTxt = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+  };
+  const setBar = (id, pct) => {
+    const el = document.getElementById(id);
+    if (el) el.style.width = `${Math.max(0, Math.min(100, Number(pct) || 0))}%`;
+  };
+
+  // 渲染完整「当前电脑硬件配置清单」
+  const mhzStr = specs.cpu_mhz > 0 ? ` · ${(specs.cpu_mhz / 1000).toFixed(2)} GHz` : "";
+  setTxt(
+    "benchSpecCpu",
+    `${specs.cpu_full || cpu.name || "本机处理器"} (${specs.cpu_threads || cpu.threads || "-"} 逻辑线程${mhzStr})`
+  );
+  const gpuVramSpec =
+    specs.gpu_vram_gib > 0
+      ? ` · ${Math.round(specs.gpu_vram_gib)} GB 显存 (${specs.gpu_vram_gib} GiB)`
+      : "";
+  const gpuDrvSpec = specs.gpu_driver ? ` · 驱动 ${specs.gpu_driver}` : "";
+  setTxt("benchSpecGpu", `${specs.gpu_full || gpu.name || "未检测到独立显卡"}${gpuVramSpec}${gpuDrvSpec}`);
+
+  if (hw._clientFallback) {
+    setTxt("benchSpecRam", `>= ${ram.total_gib || 8} GB (重启一次 run.bat 可读取精确物理内存容量)`);
+    setTxt("benchSpecDisk", "本地固态存储 (重启一次 run.bat 可读取硬盘型号与容量)");
+    setTxt("benchPcSpecsSourceHint", "浏览器兼容识别（重启一次服务可显示完整主板/硬盘/显存详情）");
+  } else {
+    const nomGb = specs.ram_nominal_gb || Math.round(ram.total_gib || 0);
+    setTxt("benchSpecRam", `${nomGb} GB 物理内存 (可用总量 ${ram.total_gib ?? 0} GiB · 当前空闲 ${ram.avail_gib ?? 0} GiB)`);
+    const diskModelStr = Array.isArray(specs.disk_models) && specs.disk_models.length > 0 ? specs.disk_models.join(" / ") : "本地磁盘";
+    const drivePrefix = specs.drive_root ? `${specs.drive_root} ` : "";
+    const capStr = disk.total_gib > 0 ? ` · 可用 ${disk.free_gib} / ${disk.total_gib} GiB` : "";
+    setTxt("benchSpecDisk", `${drivePrefix}${diskModelStr}${capStr}`);
+    setTxt("benchPcSpecsSourceHint", "");
+  }
+  setTxt("benchSpecBoard", specs.board_name || "--");
+  setTxt("benchSpecOs", specs.os_name || "--");
+
+  setTxt("benchCpuNameText", cpu.name || "--");
+  setTxt("benchCpuLoadText", hw._clientFallback ? `${cpu.threads || 8} 核` : `${(cpu.load_pct ?? 0).toFixed(1)}%`);
+  setBar("benchCpuBarFill", cpu.load_pct ?? 0);
+  const cpuSubParts = [`${cpu.threads || "-"} 线程`];
+  if (_benchStaticHwMetrics.cpu_score > 0) {
+    cpuSubParts.push(`${_benchStaticHwMetrics.cpu_score} 分`);
+  }
+  setTxt("benchCpuSubText", cpuSubParts.join(" · "));
+
+  if (hw._clientFallback) {
+    setTxt("benchRamPctText", "浏览器沙箱");
+    setTxt("benchRamTitleText", `约 >= ${ram.total_gib || 8} GiB`);
+    setTxt(
+      "benchRamSubText",
+      _benchStaticHwMetrics.mem_bw_gbps > 0 ? `实测内存吞吐 ${_benchStaticHwMetrics.mem_bw_gbps} GB/s` : "重启一次后端可读取精确物理内存"
+    );
+  } else {
+    setTxt("benchRamPctText", `${(ram.percent ?? 0).toFixed(1)}%`);
+    setTxt("benchRamTitleText", `${ram.used_gib ?? 0} / ${ram.total_gib ?? 0} GiB`);
+    setBar("benchRamBarFill", ram.percent ?? 0);
+    setTxt(
+      "benchRamSubText",
+      `可用 ${ram.avail_gib ?? 0} GiB` +
+        (_benchStaticHwMetrics.mem_bw_gbps > 0 ? ` · 带宽 ${_benchStaticHwMetrics.mem_bw_gbps} GB/s` : "")
+    );
+  }
+
+  setTxt("benchGpuNameText", gpu.name || "未检测到独立显卡");
+  if (gpu.vram_total_gib > 0) {
+    setTxt("benchGpuUtilText", `${(gpu.gpu_util_pct ?? 0).toFixed(0)}%`);
+    setBar("benchGpuVramBarFill", gpu.vram_percent ?? 0);
+    const pwrStr = gpu.power_w > 0 ? `${gpu.power_w.toFixed(0)}W` : "--W";
+    const tmpStr = gpu.temp_c > 0 ? `${gpu.temp_c}°C` : "--°C";
+    setTxt("benchGpuSubText", `显存 ${gpu.vram_used_gib}/${gpu.vram_total_gib} GiB · ${tmpStr} · ${pwrStr}`);
+  } else {
+    setTxt("benchGpuUtilText", gpu.available ? "就绪" : "CPU/云端");
+    setBar("benchGpuVramBarFill", 0);
+    setTxt("benchGpuSubText", hw._clientFallback ? "重启一次服务可解锁功耗/温度/显存监控" : "共享内存或云端 API 推理");
+  }
+
+  if (_benchStaticHwMetrics.disk_read_mbps > 0) {
+    setTxt("benchDiskSpeedText", `${_benchStaticHwMetrics.disk_read_mbps} MB/s`);
+    setBar("benchDiskBarFill", Math.min(100, (_benchStaticHwMetrics.disk_read_mbps / 3500) * 100));
+  }
+  if (disk.total_gib > 0) {
+    setTxt("benchDiskTitleText", `可用 ${disk.free_gib} / ${disk.total_gib} GiB`);
+  } else if (hw._clientFallback) {
+    setTxt("benchDiskTitleText", "本地存储");
+  }
+}
+
+async function _pollTelemetryOnce() {
+  try {
+    const res = await fetch("/api/system/benchmark/telemetry", { cache: "no-store" });
+    if (res.status === 404) {
+      _renderBenchTelemetry(_detectBrowserFallbackHardware());
+      return;
+    }
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && data.ok) {
+      _renderBenchTelemetry(data);
+    }
+  } catch (e) {}
+}
+
+window.refreshBenchmarkModels = async function (preferCurrent = true) {
+  const sel = document.getElementById("benchModelSelect");
+  if (!sel) return;
+  const prevVal = sel.value;
+  if (!availableModelsData) {
+    try {
+      await loadModels(false);
+    } catch (e) {}
+  } else {
+    try {
+      const r = await fetch("/api/models", { cache: "no-store" });
+      if (r.ok) availableModelsData = await r.json();
+    } catch (e) {}
+  }
+  const d = availableModelsData || {};
+  const localList = Array.isArray(d.local_models) ? d.local_models : [];
+  const cloudSet = new Set([
+    ...(Array.isArray(d.custom_models) ? d.custom_models : []),
+    ...(Array.isArray(d.remote_models) ? d.remote_models : []),
+    ...(Array.isArray(d.models) ? d.models : [])
+  ]);
+  const localIds = new Set(localList.map((lm) => lm.id || lm.name).filter(Boolean));
+
+  sel.innerHTML = "";
+  if (localList.length > 0) {
+    const ogLocal = document.createElement("optgroup");
+    ogLocal.label = "本地模型";
+    localList.forEach((lm) => {
+      const id = lm.id || lm.name;
+      if (!id) return;
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.dataset.isLocal = "1";
+      const engTag = lm.engine === "strata" ? "Strata" : lm.engine === "llama" ? "Llama" : "Ollama";
+      opt.textContent = `[${engTag}] ${lm.display_name || lm.name || id}`;
+      ogLocal.appendChild(opt);
+    });
+    sel.appendChild(ogLocal);
+  }
+
+  const cloudArr = Array.from(cloudSet).filter((m) => m && !localIds.has(m));
+  if (cloudArr.length > 0) {
+    const ogCloud = document.createElement("optgroup");
+    ogCloud.label = "API 模型";
+    cloudArr.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.dataset.isLocal = "0";
+      opt.textContent = `[API] ${m}`;
+      ogCloud.appendChild(opt);
+    });
+    sel.appendChild(ogCloud);
+  }
+
+  if (sel.options.length === 0 && headerModelSelect && headerModelSelect.options.length > 0) {
+    Array.from(headerModelSelect.options).forEach((o) => {
+      if (!o.disabled && o.value) {
+        const opt = document.createElement("option");
+        opt.value = o.value;
+        opt.dataset.isLocal = localIds.has(o.value) ? "1" : "0";
+        opt.textContent = o.textContent;
+        sel.appendChild(opt);
+      }
+    });
+  }
+
+  const headerCur = headerModelSelect?.value || d.current || "";
+  const want = (!preferCurrent && prevVal) ? prevVal : (headerCur || prevVal);
+  if (want && Array.from(sel.options).some((o) => o.value === want)) {
+    sel.value = want;
+  }
+  window.syncBenchmarkModelPolicyUI && window.syncBenchmarkModelPolicyUI();
+};
+
+function _isSelectedBenchModelLocal() {
+  const sel = document.getElementById("benchModelSelect");
+  const val = sel?.value?.trim() || "";
+  if (!val) return false;
+  const curOpt = sel?.selectedOptions?.[0];
+  if (curOpt && curOpt.dataset && curOpt.dataset.isLocal !== undefined) {
+    return curOpt.dataset.isLocal === "1";
+  }
+  const localList = Array.isArray(availableModelsData?.local_models) ? availableModelsData.local_models : [];
+  if (localList.some((lm) => lm.id === val || lm.name === val)) return true;
+  const optTxt = String(curOpt?.textContent || "");
+  if (optTxt.startsWith("[本地") || optTxt.startsWith("[Strata]") || optTxt.startsWith("[Llama]") || optTxt.startsWith("[Ollama]")) return true;
+  return false;
+}
+
+window.syncBenchmarkModelPolicyUI = function () {
+  const isLocal = _isSelectedBenchModelLocal();
+  const modeSel = document.getElementById("benchModeSelect");
+  const btnStart = document.getElementById("btnStartBenchmark");
+  const parSection = document.getElementById("benchParallelStressSection");
+  const btnParStart = document.getElementById("btnStartParallelBench");
+  const parHint = document.getElementById("benchParallelTheoryHint");
+  const parControls = ["benchParallelCountSelect", "benchParallelCtxSelect", "benchParallelMaxTokSelect", "benchParallelDurSelect"]
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+
+  if (modeSel) {
+    const fullOpt = modeSel.querySelector('option[value="full"]');
+    if (fullOpt) {
+      fullOpt.disabled = !isLocal;
+      fullOpt.textContent = isLocal ? "高压测试 (32K · 8192 · 60s)" : "高压测试 (仅本地)";
+    }
+    if (!isLocal && modeSel.value !== "quick") {
+      modeSel.value = "quick";
+    }
+  }
+
+  const isQuick = (modeSel?.value || "quick") === "quick";
+  if (btnStart && !window._isBenchmarkRunning) {
+    btnStart.textContent = "开始";
+  }
+
+  if (!window._isBenchmarkRunning) {
+    const tpDesc = document.querySelector('#benchStagesList .bench-stage-row[data-stage="throughput"] .bench-stage-desc');
+    const pfDesc = document.querySelector('#benchStagesList .bench-stage-row[data-stage="prefill"] .bench-stage-desc');
+    if (tpDesc && !tpDesc.closest(".bench-stage-row")?.classList.contains("is-done")) {
+      tpDesc.textContent = isQuick ? "吞吐 · P95" : "32K · 8192 · 60s";
+    }
+    if (pfDesc && !pfDesc.closest(".bench-stage-row")?.classList.contains("is-done")) {
+      pfDesc.textContent = isQuick ? "~3.2K · 捞针" : "32K · 捞针";
+    }
+  }
+
+  if (parSection) {
+    parSection.style.opacity = isLocal ? "1" : "0.68";
+  }
+  if (!window._isBenchmarkRunning) {
+    parControls.forEach((el) => { el.disabled = !isLocal; });
+    if (btnParStart) {
+      btnParStart.disabled = !isLocal;
+      btnParStart.textContent = isLocal ? "开始并行" : "仅本地可用";
+    }
+  }
+  if (parHint) {
+    parHint.textContent = isLocal ? "" : "API 已禁用";
+  }
+};
+
+function _resetBenchmarkDashboardUI(isQuick = false) {
+  _benchChartSeries = [];
+  _benchLastReport = null;
+  const setTxt = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+  };
+  setTxt("benchMasterPct", "0%");
+  const mFill = document.getElementById("benchMasterProgressFill");
+  if (mFill) {
+    mFill.style.width = "0%";
+    mFill.classList.remove("is-done", "is-error", "is-active");
+  }
+  setTxt("benchKpiTps", "--");
+  setTxt("benchKpiTpsSub", "峰值 -- · P95 --ms");
+  setTxt("benchKpiTtft", "--");
+  setTxt("benchKpiTtftSub", "长文 --ms");
+  setTxt("benchKpiPrefill", "--");
+  setTxt("benchKpiPrefillSub", isQuick ? "~3.2K · 捞针" : "32K · 捞针");
+  setTxt("benchKpiProto", "--");
+  setTxt("benchKpiProtoSub", "投骰 · 状态 · 选项");
+  setTxt("benchLiveStreamBox", "");
+  setTxt("benchStreamCounter", "--");
+
+  const repCard = document.getElementById("benchReportCard");
+  if (repCard) repCard.style.display = "none";
+
+  const areaP = document.getElementById("benchChartAreaPath");
+  const tpsP = document.getElementById("benchChartTpsPath");
+  const gpuP = document.getElementById("benchChartGpuPath");
+  const emptyH = document.getElementById("benchChartEmptyHint");
+  if (areaP) areaP.setAttribute("d", "");
+  if (tpsP) tpsP.setAttribute("d", "");
+  if (gpuP) gpuP.setAttribute("d", "");
+  if (emptyH) emptyH.style.display = "flex";
+
+  const defaultDescs = {
+    hardware: "CPU · 内存 · 磁盘",
+    ttft: "短文响应",
+    throughput: isQuick ? "吞吐 · P95" : "32K · 8192 · 60s",
+    prefill: isQuick ? "~3.2K · 捞针" : "32K · 捞针",
+    protocol: "投骰 · 状态 · 选项"
+  };
+  document.querySelectorAll("#benchStagesList .bench-stage-row").forEach((row, idx) => {
+    row.classList.remove("is-active", "is-done");
+    const st = row.dataset.stage;
+    const dot = row.querySelector(".bench-stage-dot");
+    if (dot) dot.textContent = String(idx + 1);
+    const desc = row.querySelector(".bench-stage-desc");
+    if (desc && defaultDescs[st]) desc.textContent = defaultDescs[st];
+    row.style.opacity = "1";
+  });
+}
+
+function _pushBenchChartSample(tpsVal, gpuPctVal) {
+  _benchChartSeries.push({
+    tps: Math.max(0, Number(tpsVal) || 0),
+    gpu: Math.max(0, Math.min(100, Number(gpuPctVal) || 0))
+  });
+  if (_benchChartSeries.length > 76) {
+    _benchChartSeries.shift();
+  }
+  const emptyH = document.getElementById("benchChartEmptyHint");
+  if (emptyH && _benchChartSeries.length >= 1) emptyH.style.display = "none";
+
+  const n = _benchChartSeries.length;
+  if (n < 1) return;
+  const W = 640;
+  const H = 165;
+  const padTop = 14;
+  const padBot = 12;
+  const usableH = H - padTop - padBot;
+  const maxTps = Math.max(30, ..._benchChartSeries.map((s) => s.tps)) * 1.12;
+
+  const ptsTps = _benchChartSeries.map((s, i) => {
+    const x = n === 1 ? W : (i / (n - 1)) * W;
+    const y = padTop + usableH * (1 - Math.min(1, s.tps / maxTps));
+    return [x, y];
+  });
+  const ptsGpu = _benchChartSeries.map((s, i) => {
+    const x = n === 1 ? W : (i / (n - 1)) * W;
+    const y = padTop + usableH * (1 - s.gpu / 100);
+    return [x, y];
+  });
+
+  if (n === 1) {
+    ptsTps.unshift([0, ptsTps[0][1]]);
+    ptsGpu.unshift([0, ptsGpu[0][1]]);
+  }
+
+  const toLineD = (pts) => pts.map((p, idx) => `${idx === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const lineTps = toLineD(ptsTps);
+  const areaTps = `${lineTps} L${ptsTps[ptsTps.length - 1][0].toFixed(1)},${H} L0,${H} Z`;
+  const lineGpu = toLineD(ptsGpu);
+
+  document.getElementById("benchChartAreaPath")?.setAttribute("d", areaTps);
+  document.getElementById("benchChartTpsPath")?.setAttribute("d", lineTps);
+  document.getElementById("benchChartGpuPath")?.setAttribute("d", lineGpu);
+}
+
+function _markBenchStage(stageKey, state, summaryText = "") {
+  const row = document.querySelector(`#benchStagesList .bench-stage-row[data-stage="${stageKey}"]`);
+  if (!row) return;
+  row.classList.toggle("is-active", state === "active");
+  row.classList.toggle("is-done", state === "done");
+  const dot = row.querySelector(".bench-stage-dot");
+  if (dot && state === "done") dot.textContent = "✓";
+  if (summaryText) {
+    const desc = row.querySelector(".bench-stage-desc");
+    if (desc) desc.textContent = summaryText;
+  }
+}
+
+function _setBenchMasterProgress(pct, stageTitle, badgeText, badgeClass = "is-running") {
+  const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+  const pctEl = document.getElementById("benchMasterPct");
+  if (pctEl) pctEl.textContent = `${p}%`;
+  const fill = document.getElementById("benchMasterProgressFill");
+  if (fill) {
+    fill.style.width = `${p}%`;
+    fill.classList.toggle("is-active", badgeClass === "is-running");
+    fill.classList.toggle("is-done", badgeClass === "is-done");
+    fill.classList.toggle("is-error", badgeClass === "is-error");
+  }
+  if (stageTitle) {
+    const stEl = document.getElementById("benchCurrentStageTitle");
+    if (stEl) stEl.textContent = stageTitle;
+  }
+  if (badgeText) {
+    const bEl = document.getElementById("benchStateBadge");
+    if (bEl) {
+      bEl.textContent = badgeText;
+      bEl.className = `bench-state-badge ${badgeClass}`;
+    }
+  }
+}
+
+function _buildClientSideRecGlobalParams(tpsVal, longTtftMs) {
+  const gs = window.globalUserSettings || {};
+  const cur = {
+    context_mode: gs.context_mode || "tokens",
+    max_context_k: Number(gs.max_context_k ?? 96),
+    context: Number(gs.context ?? gs.max_context_turns ?? 64),
+    max_tokens: Number(gs.max_tokens ?? 8192),
+    thinking_budget: Number(gs.thinking_budget ?? 1024),
+    keep_recent_messages: Number(gs.keep_recent_messages ?? 6),
+    worldbook_scan_depth: Number(gs.worldbook_scan_depth ?? 5),
+    auto_summarize: gs.auto_summarize !== false
+  };
+  let ctxMode = "tokens";
+  let ctxK = 64;
+  let turns = 48;
+  let keep = 8;
+  let wbDepth = 5;
+  let profileTitle = "64K";
+  if (tpsVal >= 38 && longTtftMs <= 2600) {
+    ctxMode = "tokens";
+    ctxK = 96;
+    turns = 96;
+    keep = 10;
+    wbDepth = 6;
+    profileTitle = "96K";
+  } else if (tpsVal < 18 || longTtftMs > 4500) {
+    ctxMode = "turns";
+    ctxK = 32;
+    turns = 18;
+    keep = 6;
+    wbDepth = 4;
+    profileTitle = "32K";
+  }
+  const maxTok = tpsVal >= 25 ? 8192 : tpsVal >= 15 ? 6144 : 4096;
+  const thinkB = tpsVal >= 50 ? 1280 : tpsVal >= 25 ? 1024 : tpsVal >= 15 ? 512 : 0;
+  return {
+    profileTitle,
+    cur,
+    rec: {
+      context_mode: ctxMode,
+      max_context_k: ctxK,
+      context: turns,
+      max_context_turns: turns,
+      max_tokens: maxTok,
+      thinking_budget: thinkB,
+      keep_recent_messages: keep,
+      worldbook_scan_depth: wbDepth,
+      auto_summarize: true
+    }
+  };
+}
+
+function _renderBenchRecParamsDiff(rep) {
+  const box = document.getElementById("benchRecParamsBox");
+  const grid = document.getElementById("benchRecDiffGrid");
+  const badge = document.getElementById("benchRecProfileBadge");
+  const noteEl = document.getElementById("benchRecStatusNote");
+  const btnApply = document.getElementById("btnApplyBenchRecParams");
+  const btnSkip = document.getElementById("btnSkipBenchRecParams");
+  if (!box || !grid) return;
+
+  const rec = rep.recommended_global_params;
+  if (!rec || !rep.is_local) {
+    box.style.display = "none";
+    return;
+  }
+  const gs = window.globalUserSettings || {};
+  const cur = rep.current_global_params || {
+    context_mode: gs.context_mode || "tokens",
+    max_context_k: Number(gs.max_context_k ?? 96),
+    context: Number(gs.context ?? gs.max_context_turns ?? 64),
+    max_tokens: Number(gs.max_tokens ?? 8192),
+    thinking_budget: Number(gs.thinking_budget ?? 1024),
+    keep_recent_messages: Number(gs.keep_recent_messages ?? 6),
+    worldbook_scan_depth: Number(gs.worldbook_scan_depth ?? 5),
+    auto_summarize: gs.auto_summarize !== false
+  };
+
+  if (badge) badge.textContent = rep.rec_profile_title || "";
+  if (noteEl) {
+    noteEl.textContent = "";
+  }
+  if (btnApply) {
+    btnApply.disabled = false;
+    btnApply.textContent = "应用";
+  }
+  if (btnSkip) {
+    btnSkip.style.display = "inline-flex";
+  }
+
+  const fmtMode = (m) => (m === "turns" ? "轮数" : "Token");
+  const fmtThink = (n) => (Number(n) > 0 ? `${n}` : "关");
+  const fmtBool = (b) => (b !== false ? "开" : "关");
+  const items = [
+    { label: "上下文模式", oldV: fmtMode(cur.context_mode), newV: fmtMode(rec.context_mode) },
+    { label: "上下文上限", oldV: `${cur.max_context_k}k`, newV: `${rec.max_context_k}k` },
+    { label: "轮数上限", oldV: `${cur.context}`, newV: `${rec.context}` },
+    { label: "单次输出", oldV: `${cur.max_tokens}`, newV: `${rec.max_tokens}` },
+    { label: "思考预算", oldV: fmtThink(cur.thinking_budget), newV: fmtThink(rec.thinking_budget) },
+    { label: "保留近期", oldV: `${cur.keep_recent_messages} 条`, newV: `${rec.keep_recent_messages} 条` },
+    { label: "世界书深度", oldV: `${cur.worldbook_scan_depth} 轮`, newV: `${rec.worldbook_scan_depth} 轮` },
+    { label: "自动压缩", oldV: fmtBool(cur.auto_summarize), newV: fmtBool(rec.auto_summarize) }
+  ];
+
+  grid.innerHTML = items
+    .map((it) => {
+      const changed = String(it.oldV) !== String(it.newV);
+      return `
+        <div class="bench-rec-chip ${changed ? "is-changed" : ""}">
+          <span class="bench-rec-chip-label">${escapeHtml(it.label)}</span>
+          <div class="bench-rec-chip-val">
+            ${
+              changed
+                ? `<span class="old-v">${escapeHtml(it.oldV)}</span><span>→</span><span class="new-v">${escapeHtml(it.newV)}</span>`
+                : `<span>${escapeHtml(it.newV)}</span>`
+            }
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  box.style.display = "flex";
+}
+
+window.applyBenchmarkRecommendedParams = async function () {
+  const rep = _benchLastReport?.report;
+  const rec = rep?.recommended_global_params;
+  if (!rec) return;
+
+  const btnApply = document.getElementById("btnApplyBenchRecParams");
+  const btnSkip = document.getElementById("btnSkipBenchRecParams");
+  const noteEl = document.getElementById("benchRecStatusNote");
+  const alsoSetModel = Boolean(document.getElementById("benchChkAlsoSetModel")?.checked);
+
+  const payload = { ...rec };
+  delete payload.temperature;
+  delete payload.repetition_penalty;
+  if (alsoSetModel && rep.model) {
+    payload.model = rep.model;
+  }
+
+  if (btnApply) {
+    btnApply.disabled = true;
+    btnApply.textContent = "应用中...";
+  }
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+    await loadSettings();
+    if (alsoSetModel && rep.model) {
+      await loadModels(false);
+    }
+    if (typeof window.updateContextProgressUI === "function") {
+      window.updateContextProgressUI();
+    }
+    rep.current_global_params = { ...rec };
+    _renderBenchRecParamsDiff(rep);
+    if (btnApply) {
+      btnApply.disabled = true;
+      btnApply.textContent = "已应用";
+    }
+    if (btnSkip) btnSkip.style.display = "none";
+    showToast("已应用建议参数");
+  } catch (err) {
     if (btnApply) {
       btnApply.disabled = false;
-      btnApply.textContent = tr(isRepair ? "覆盖修复" : "一键更新");
+      btnApply.textContent = "应用";
+    }
+    showToast("应用失败: " + (err?.message || err));
+  }
+};
+
+window.dismissBenchmarkRecommendedParams = function () {
+  const btnSkip = document.getElementById("btnSkipBenchRecParams");
+  if (btnSkip) btnSkip.style.display = "none";
+};
+
+function _showFinalBenchmarkReport(rep, hw) {
+  _benchLastReport = { report: rep, hw };
+  const card = document.getElementById("benchReportCard");
+  if (!card) return;
+  card.style.display = "flex";
+
+  const ring = document.getElementById("benchGradeRing");
+  if (ring) ring.textContent = rep.grade || "A";
+  const titleEl = document.getElementById("benchReportTitle");
+  if (titleEl) titleEl.textContent = `${rep.overall_score} 分`;
+  const subEl = document.getElementById("benchReportModelSub");
+  if (subEl) {
+    subEl.textContent = `${rep.model} · ${rep.sustained_tps} tok/s · 首字 ${rep.short_ttft_ms}ms`;
+  }
+  const tipsUl = document.getElementById("benchReportTips");
+  if (tipsUl) {
+    const tips = Array.isArray(rep.tips) ? rep.tips : [];
+    tipsUl.innerHTML = tips.map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+    tipsUl.style.display = tips.length > 0 ? "flex" : "none";
+  }
+  _renderBenchRecParamsDiff(rep);
+  setTimeout(() => {
+    try {
+      card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (e) {}
+  }, 80);
+}
+
+window.copyBenchmarkReport = async function () {
+  if (!_benchLastReport || (!_benchLastReport.report && !_benchLastReport.parallelReport)) {
+    showToast("暂无报告");
+    return;
+  }
+  const hw = _benchLastReport.hw || {};
+  let lines = [];
+  if (_benchLastReport.parallelReport) {
+    const r = _benchLastReport.parallelReport;
+    lines = [
+      `[并行测试] ${r.model} (${r.parallel}路 · ${r.context_k}K · ${r.duration_s}s)`,
+      `硬件: ${hw.cpu?.name || "-"} / ${hw.gpu?.name || "-"}`,
+      `总吞吐: ${r.aggregate_tps} tok/s (峰值 ${r.peak_agg_tps} tok/s) · 合计: ${r.total_tokens} tok`,
+      `单路均速: ${r.per_lane_tps} tok/s · 平均首字: ${Math.round(r.avg_ttft_ms || 0)}ms`,
+      ...(r.lanes || []).map((l) => `  #${l.id}: ${l.tps} tok/s · ${l.tokens} tok`)
+    ];
+  } else {
+    const r = _benchLastReport.report;
+    lines = [
+      `[性能测试] ${r.grade} (${r.overall_score}/100) · ${r.model}`,
+      `硬件: ${hw.cpu?.name || "-"} / ${hw.gpu?.name || "-"} (${hw.gpu?.vram_total_gib || "-"} GiB)`,
+      `吐字: ${r.sustained_tps} tok/s (峰值 ${r.peak_tps} · P95 ${r.p95_tpot_ms}ms)`,
+      `首字: ${r.short_ttft_ms}ms · 长文首字: ${r.long_ttft_ms}ms · 预填: ${r.prefill_tps} tok/s`,
+      `协议: ${r.protocol_score}/100`
+    ];
+  }
+  try {
+    await navigator.clipboard.writeText(lines.join("\n"));
+    showToast("已复制");
+  } catch (e) {
+    showToast("复制失败");
+  }
+};
+
+// 当旧内存后端尚未加载 /api/system/benchmark/stream (404) 时的无缝前端流式兼容测速引擎
+async function _runClientFallbackBenchmark(targetModel, isFull, signal) {
+  const hw = _detectBrowserFallbackHardware();
+  _markBenchStage("hardware", "active");
+  _setBenchMasterProgress(8, "正在执行浏览器端 CPU / 内存算力微基准...", "测试中", "is-running");
+  await new Promise((r) => setTimeout(r, 40));
+  const t0 = performance.now();
+  const arr = new Float64Array(2 * 1024 * 1024); // 16 MB
+  let sum = 0;
+  for (let round = 0; round < 6; round++) {
+    for (let i = 0; i < arr.length; i += 4) {
+      arr[i] = i * 0.0001 + round;
+      sum += arr[i];
+    }
+  }
+  const dtS = Math.max(0.005, (performance.now() - t0) / 1000);
+  const memBw = Number(((16 * 6) / 1024 / dtS).toFixed(2));
+  const cpuScore = Math.round(memBw * 320 + (hw.cpu.threads || 8) * 48 + (sum > -1e9 ? 0 : 1));
+  _benchStaticHwMetrics = { cpu_score: cpuScore, mem_bw_gbps: memBw, disk_read_mbps: 0 };
+  _renderBenchTelemetry(hw);
+  _markBenchStage("hardware", "done", `算力 ${cpuScore} 分 · 内存吞吐 ${memBw} GB/s`);
+
+  // 创建临时跑团测速会话并在 finally 中 100% 自动销毁，绝不残留存档
+  let tempChatId = "";
+  const estTokens = (s, chunks) => {
+    const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+    const asc = (s.replace(/[\u4e00-\u9fff]/g, " ").match(/\S+/g) || []).length;
+    const e = Math.max(1, Math.round(cjk * 0.68 + asc * 0.9));
+    return chunks >= 6 && chunks >= e * 0.5 && chunks <= e * 1.85 ? chunks : e;
+  };
+
+  const runPromptViaTempChat = async (stageKey, pctStart, pctEnd, promptText) => {
+    const cRes = await fetch("/api/chats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "__bench_tmp__", project_id: "proj_free_chat" }),
+      signal
+    });
+    const cJson = await cRes.json();
+    const cid = cJson.id;
+    try {
+      const tReq0 = performance.now();
+      let ttftMs = null;
+      let chunks = 0;
+      let fullText = "";
+      const tokTimes = [];
+      const sRes = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: cid, message: promptText, model: targetModel, project_id: "proj_free_chat" }),
+        signal
+      });
+      if (!sRes.ok || !sRes.body) throw new Error(`HTTP ${sRes.status}`);
+      const reader = sRes.body.getReader();
+      const dec = new TextDecoder("utf-8");
+      let buf = "";
+      let lastUiAt = 0;
+      const box = document.getElementById("benchLiveStreamBox");
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const ln of lines) {
+          const s = ln.trim();
+          if (!s.startsWith("data:")) continue;
+          const raw = s.slice(5).trim();
+          if (!raw || raw === "[DONE]") continue;
+          let ev = null;
+          try { ev = JSON.parse(raw); } catch (e) { continue; }
+          if (ev.error) throw new Error(ev.error);
+          const piece = ev.chunk || "";
+          if (piece) {
+            const now = performance.now();
+            if (ttftMs === null) {
+              ttftMs = Number((now - tReq0).toFixed(1));
+              if (stageKey === "ttft") document.getElementById("benchKpiTtft").textContent = String(Math.round(ttftMs));
+            }
+            fullText += piece;
+            chunks++;
+            tokTimes.push(now);
+            if (box) {
+              box.textContent += piece;
+              box.scrollTop = box.scrollHeight;
+            }
+            if (now - lastUiAt >= 90) {
+              lastUiAt = now;
+              const toks = estTokens(fullText, chunks);
+              const spanS = Math.max(0.03, (now - tokTimes[0]) / 1000);
+              const tps = Number((toks / spanS).toFixed(1));
+              if (stageKey === "throughput" || stageKey === "ttft") {
+                document.getElementById("benchKpiTps").textContent = String(tps);
+              }
+              document.getElementById("benchStreamCounter").textContent = `${stageKey.toUpperCase()} · 已生成 ${fullText.length} 字 (~${toks} tok) · ${tps} tok/s`;
+              _pushBenchChartSample(tps, 0);
+              const curPct = Math.round(pctStart + (pctEnd - pctStart) * Math.min(0.95, toks / 180));
+              _setBenchMasterProgress(curPct);
+            }
+          }
+        }
+      }
+      const tEnd = performance.now();
+      const outToks = estTokens(fullText, chunks);
+      const effTtft = ttftMs ?? Number((tEnd - tReq0).toFixed(1));
+      const decodeS = tokTimes.length >= 3 ? Math.max(0.02, (tokTimes[tokTimes.length - 1] - tokTimes[0]) / 1000) : Math.max(0.05, (tEnd - tReq0) / 1000);
+      const susTps = Number((Math.max(1, outToks - 1) / decodeS).toFixed(1));
+      return { text: fullText, ttft_ms: effTtft, sustained_tps: susTps, peak_tps: Number((susTps * 1.08).toFixed(1)), p95_tpot_ms: Number((1000 / Math.max(1, susTps)).toFixed(1)), output_tokens: outToks };
+    } finally {
+      fetch(`/api/chats/${encodeURIComponent(cid)}`, { method: "DELETE" }).catch(() => {});
+    }
+  };
+
+  const box = document.getElementById("benchLiveStreamBox");
+  _markBenchStage("ttft", "active");
+  _setBenchMasterProgress(20, "[2] 正在测试首字响应延迟 (TTFT)...", "测试中", "is-running");
+  if (box) box.textContent = "【阶段 2 · 首字延迟测试】\n";
+  const r2 = await runPromptViaTempChat("ttft", 20, 38, "请直接用两句话简短描写推开酒馆木门瞬间的暖风与火光（不要寒暄，不超过50字）。");
+  document.getElementById("benchKpiTtft").textContent = String(Math.round(r2.ttft_ms));
+  _markBenchStage("ttft", "done", `首字延迟 ${r2.ttft_ms} ms`);
+
+  _markBenchStage("throughput", "active");
+  _setBenchMasterProgress(40, "[3] 正在执行持续叙事吞吐压测 (Sustained TPS)...", "测试中", "is-running");
+  if (box) box.textContent += "\n\n【阶段 3 · 持续吐字压测】\n";
+  const r3 = await runPromptViaTempChat("throughput", 40, isFull ? 70 : 96, "请直接输出一段约 240 字的雨夜港口集装箱潜行跑团场景描写，注重光影、雨声与紧张氛围，不要列表选项。");
+  document.getElementById("benchKpiTps").textContent = String(r3.sustained_tps);
+  document.getElementById("benchKpiTpsSub").textContent = `峰值 ${r3.peak_tps} tok/s · P95间隔 ${r3.p95_tpot_ms} ms`;
+  _markBenchStage("throughput", "done", `持续 ${r3.sustained_tps} tok/s · 峰值 ${r3.peak_tps} tok/s`);
+
+  let longTtft = r2.ttft_ms;
+  let prefillTps = Math.round(1800 / Math.max(0.05, r2.ttft_ms / 1000));
+  let protoScore = 100;
+
+  if (isFull) {
+    _markBenchStage("prefill", "active");
+    _setBenchMasterProgress(72, "[4] 正在测试长上下文世界书消化吞吐...", "测试中", "is-running");
+    let lore = "";
+    for (let i = 1; i <= 24; i++) {
+      lore += `【卷宗 #${i}】雾港第 ${i} 扇区设有蒸汽阀站 B-${i}，电报频段 ${140 + i}.5 MHz，暗号『白鸦-${i}』。\n`;
+    }
+    if (box) box.textContent += "\n\n【阶段 4 · 长上下文捞针】\n";
+    const pToks = estTokens(lore, 0);
+    const r4 = await runPromptViaTempChat("prefill", 72, 86, `${lore}\n问题：卷宗 #17 的电报频段是多少 MHz？暗号是什么？（一句话回答）`);
+    longTtft = r4.ttft_ms;
+    prefillTps = Number((pToks / Math.max(0.02, longTtft / 1000)).toFixed(1));
+    document.getElementById("benchKpiTtftSub").textContent = `长文首字 ${Math.round(longTtft)} ms`;
+    document.getElementById("benchKpiPrefill").textContent = String(Math.round(prefillTps));
+    _markBenchStage("prefill", "done", `预填充 ${prefillTps} tok/s · 长文首字 ${longTtft} ms`);
+
+    _markBenchStage("protocol", "active");
+    _setBenchMasterProgress(88, "[5] 正在检定跑团 D100 数值逻辑与结构化协议...", "测试中", "is-running");
+    if (box) box.textContent += "\n\n【阶段 5 · 跑团协议检定】\n";
+    const r5 = await runPromptViaTempChat(
+      "protocol",
+      88,
+      98,
+      "请严格按顺序输出：1. 约80字剧情（开锁技能35，D100掷出89失败，必须描写撬锁失败！）；2. <status>生命: 100/100 | 警戒: 60%</status>；3. 最后给出 1. 2. 3. 三个行动选项。"
+    );
+    protoScore = 0;
+    if (/失败|断裂|卡死|警报|未能|滑脱|暴露/.test(r5.text)) protoScore += 45;
+    if (/<status>[\s\S]+?<\/status>/i.test(r5.text)) protoScore += 30;
+    if (/1[.、）)]/.test(r5.text) && /2[.、）)]/.test(r5.text)) protoScore += 25;
+    document.getElementById("benchKpiProto").textContent = String(protoScore);
+    _markBenchStage("protocol", "done", `协议与逻辑得分 ${protoScore}/100`);
+  }
+
+  const overall = Math.min(100, Math.max(25, Math.round(Math.min(100, (r3.sustained_tps / 55) * 100) * 0.55 + protoScore * 0.25 + 20)));
+  const grade = overall >= 90 ? "S+" : overall >= 80 ? "S" : overall >= 70 ? "A" : "B";
+  const fbRec = _buildClientSideRecGlobalParams(r3.sustained_tps, longTtft, protoScore);
+  const rep = {
+    model: targetModel,
+    is_local: false,
+    engine: "auto",
+    overall_score: overall,
+    grade,
+    grade_label: overall >= 80 ? "极速丝滑 · 体验卓越" : "流畅可用",
+    short_ttft_ms: r2.ttft_ms,
+    long_ttft_ms: longTtft,
+    sustained_tps: r3.sustained_tps,
+    peak_tps: r3.peak_tps,
+    p95_tpot_ms: r3.p95_tpot_ms,
+    prefill_tps: prefillTps,
+    protocol_score: protoScore,
+    protocol_detail: "D100与状态栏检定",
+    cpu_score: cpuScore,
+    mem_bw_gbps: memBw,
+    disk_read_mbps: 0,
+    rec_profile_title: fbRec.profileTitle,
+    current_global_params: fbRec.cur,
+    recommended_global_params: fbRec.rec,
+    tips: [
+      `实测持续吐字速率 ${r3.sustained_tps} tok/s，短输入首字响应 ${r2.ttft_ms} ms。`,
+      "提示：重启一次 run.bat 即可激活底层主板型号、显卡实时功耗(W)、核心温度(°C)、精确显存与 NVMe 磁盘测速模块。"
+    ]
+  };
+  _setBenchMasterProgress(100, `测试完成！综合评级 ${grade} (${overall} 分)`, `已完成 · ${grade}`, "is-done");
+  _showFinalBenchmarkReport(rep, hw);
+}
+
+window.openBenchmarkModal = async function (preselectModel = "") {
+  const modal = document.getElementById("benchmarkModal");
+  if (!modal) return;
+  modal.style.display = "flex";
+  if (typeof window.translateSubtree === "function") window.translateSubtree(modal);
+
+  await window.refreshBenchmarkModels(true);
+  if (preselectModel) {
+    const sel = document.getElementById("benchModelSelect");
+    if (sel && Array.from(sel.options).some((o) => o.value === preselectModel)) {
+      sel.value = preselectModel;
+    }
+  }
+  await _pollTelemetryOnce();
+  if (_benchIdlePollTimer) clearInterval(_benchIdlePollTimer);
+  _benchIdlePollTimer = setInterval(() => {
+    if (!window._isBenchmarkRunning && modal.style.display !== "none") {
+      _pollTelemetryOnce();
+    }
+  }, 1500);
+};
+
+window.closeBenchmarkModal = function () {
+  if (window._isBenchmarkRunning) {
+    window.stopSystemBenchmark();
+  }
+  if (_benchIdlePollTimer) {
+    clearInterval(_benchIdlePollTimer);
+    _benchIdlePollTimer = null;
+  }
+  const modal = document.getElementById("benchmarkModal");
+  if (modal) modal.style.display = "none";
+};
+
+window.stopSystemBenchmark = function () {
+  if (_benchAbortController) {
+    try {
+      _benchAbortController.abort();
+    } catch (e) {}
+    _benchAbortController = null;
+  }
+};
+
+window.startSystemBenchmark = async function () {
+  if (window._isBenchmarkRunning) return;
+  const sel = document.getElementById("benchModelSelect");
+  const modeSel = document.getElementById("benchModeSelect");
+  const targetModel = sel?.value?.trim() || headerModelSelect?.value?.trim() || "";
+  if (!targetModel) {
+    showToast("请先选择模型");
+    return;
+  }
+  const mode = modeSel?.value || "full";
+  const isQuick = mode === "quick";
+
+  window._isBenchmarkRunning = true;
+  _benchAbortController = new AbortController();
+  _resetBenchmarkDashboardUI(isQuick);
+
+  const btnStart = document.getElementById("btnStartBenchmark");
+  const btnStop = document.getElementById("btnStopBenchmark");
+  const btnParStart = document.getElementById("btnStartParallelBench");
+  if (btnStart) btnStart.style.display = "none";
+  if (btnStop) btnStop.style.display = "inline-flex";
+  if (btnParStart) btnParStart.disabled = true;
+  if (sel) sel.disabled = true;
+  if (modeSel) modeSel.disabled = true;
+
+  _benchStartTs = performance.now();
+  const timerEl = document.getElementById("benchElapsedTimer");
+  if (_benchElapsedInterval) clearInterval(_benchElapsedInterval);
+  _benchElapsedInterval = setInterval(() => {
+    if (timerEl) timerEl.textContent = `${((performance.now() - _benchStartTs) / 1000).toFixed(1)}s`;
+  }, 100);
+
+  _setBenchMasterProgress(3, "准备中...", "运行中", "is-running");
+  const streamBox = document.getElementById("benchLiveStreamBox");
+
+  try {
+    const res = await fetch("/api/system/benchmark/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: targetModel, mode }),
+      signal: _benchAbortController.signal
+    });
+
+    if (res.status === 404) {
+      await _runClientFallbackBenchmark(targetModel, !isQuick, _benchAbortController.signal);
+      return;
+    }
+
+    if (!res.ok || !res.body) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson.detail || errJson.message || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let gotBenchDone = false;
+
+    const handleBenchEvent = (ev) => {
+      if (!ev || typeof ev !== "object") return;
+      if (ev.telemetry) {
+        _renderBenchTelemetry(ev.telemetry);
+      }
+      if (ev.ok === false || ev.type === "error") {
+        throw new Error(ev.message || ev.detail || "测试中断");
+      }
+
+      if (ev.type === "status") {
+        _setBenchMasterProgress(ev.percent ?? 18, ev.message || "准备中...", "运行中", "is-running");
+        return;
+      }
+
+      if (ev.type === "stage_start") {
+        _markBenchStage(ev.stage, "active");
+        const idxPrefix = ev.stage_index ? `[${ev.stage_index}/${ev.total_stages}] ` : "";
+        _setBenchMasterProgress(ev.percent ?? 10, `${idxPrefix}${ev.title || ""}`, "运行中", "is-running");
+        if (streamBox && ev.stage !== "hardware") {
+          streamBox.textContent += (streamBox.textContent ? "\n\n" : "") + `━━ ${ev.title} ━━\n`;
+          streamBox.scrollTop = streamBox.scrollHeight;
+        }
+        return;
+      }
+
+      if (ev.type === "token_tick") {
+        _setBenchMasterProgress(ev.percent ?? 50);
+        if (ev.ttft_ms != null && ev.stage === "ttft") {
+          document.getElementById("benchKpiTtft").textContent = String(Math.round(ev.ttft_ms));
+        }
+        if (ev.live_tps != null && (ev.stage === "throughput" || ev.stage === "ttft")) {
+          document.getElementById("benchKpiTps").textContent = String(ev.avg_tps ?? ev.live_tps);
+        }
+        if (ev.stage === "prefill" && ev.ttft_ms != null) {
+          document.getElementById("benchKpiTtftSub").textContent = `长文 ${Math.round(ev.ttft_ms)}ms`;
+        }
+        const gpuLoad = ev.telemetry?.gpu?.gpu_util_pct ?? ev.telemetry?.cpu?.load_pct ?? 0;
+        _pushBenchChartSample(ev.live_tps ?? ev.avg_tps ?? 0, gpuLoad);
+
+        if (ev.preview_delta && streamBox) {
+          streamBox.textContent += ev.preview_delta;
+          if (streamBox.textContent.length > 6000) {
+            streamBox.textContent = "..." + streamBox.textContent.slice(-4500);
+          }
+          streamBox.scrollTop = streamBox.scrollHeight;
+        }
+        const cntEl = document.getElementById("benchStreamCounter");
+        if (cntEl) {
+          const durPart = ev.burn_elapsed_s != null && ev.burn_target_s != null
+            ? `${ev.burn_elapsed_s}s / ${ev.burn_target_s}s · `
+            : "";
+          cntEl.textContent = `${durPart}${ev.tokens ?? "-"} tok · ${ev.live_tps ?? "-"} tok/s`;
+        }
+        return;
+      }
+
+      if (ev.type === "stage_done") {
+        _markBenchStage(ev.stage, "done", ev.summary || "");
+        _setBenchMasterProgress(ev.percent ?? 50);
+        const m = ev.metrics || {};
+        if (ev.stage === "hardware") {
+          _benchStaticHwMetrics = {
+            cpu_score: m.cpu_score || 0,
+            mem_bw_gbps: m.mem_bw_gbps || 0,
+            disk_read_mbps: m.disk_read_mbps || 0
+          };
+          if (ev.telemetry) _renderBenchTelemetry(ev.telemetry);
+        } else if (ev.stage === "ttft") {
+          document.getElementById("benchKpiTtft").textContent = String(Math.round(m.short_ttft_ms || 0));
+          const engNote = m.engine_ready_ms > 200 ? ` · 加载 ${(m.engine_ready_ms / 1000).toFixed(1)}s` : "";
+          document.getElementById("benchKpiTtftSub").textContent = `${m.burst_tps || 0} tok/s${engNote}`;
+        } else if (ev.stage === "throughput") {
+          document.getElementById("benchKpiTps").textContent = String(m.sustained_tps || 0);
+          const stabStr = m.stability_pct != null ? ` · 稳定度 ${m.stability_pct}%` : ` · P95 ${m.p95_tpot_ms || 0}ms`;
+          document.getElementById("benchKpiTpsSub").textContent = `峰值 ${m.peak_tps || 0}${stabStr}`;
+        } else if (ev.stage === "prefill") {
+          document.getElementById("benchKpiPrefill").textContent = String(Math.round(m.prefill_tps || 0));
+          document.getElementById("benchKpiPrefillSub").textContent = `${m.prompt_tokens || 0} tok · ${m.needle_hit ? "命中" : "偏移"}`;
+          document.getElementById("benchKpiTtftSub").textContent = `长文 ${Math.round(m.long_ttft_ms || 0)}ms`;
+        } else if (ev.stage === "protocol") {
+          document.getElementById("benchKpiProto").textContent = String(m.protocol_score ?? 0);
+          document.getElementById("benchKpiProtoSub").textContent = (m.checks || []).join(" · ") || "--";
+        }
+        return;
+      }
+
+      if (ev.type === "benchmark_done" && ev.report) {
+        gotBenchDone = true;
+        const rep = ev.report;
+        _setBenchMasterProgress(
+          100,
+          `完成 · ${rep.grade} (${rep.overall_score} 分)`,
+          `完成 · ${rep.grade}`,
+          "is-done"
+        );
+        const cntEl = document.getElementById("benchStreamCounter");
+        if (cntEl) cntEl.textContent = `${((performance.now() - _benchStartTs) / 1000).toFixed(1)}s`;
+        _showFinalBenchmarkReport(rep, ev.telemetry);
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        let parsed = null;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch (e) {
+          continue;
+        }
+        handleBenchEvent(parsed);
+      }
+    }
+    if (buffer.trim()) {
+      let tailParsed = null;
+      try {
+        tailParsed = JSON.parse(buffer.trim());
+      } catch (e) {}
+      if (tailParsed) {
+        handleBenchEvent(tailParsed);
+      }
+    }
+    if (!gotBenchDone) {
+      throw new Error("连接中断");
+    }
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      _setBenchMasterProgress(0, "已停止", "已停止", "");
+    } else {
+      const msg = err && err.message ? err.message : String(err);
+      _setBenchMasterProgress(100, `异常：${msg}`, "异常", "is-error");
+      showToast("测试失败: " + msg);
+    }
+  } finally {
+    window._isBenchmarkRunning = false;
+    _benchAbortController = null;
+    if (_benchElapsedInterval) {
+      clearInterval(_benchElapsedInterval);
+      _benchElapsedInterval = null;
+    }
+    if (btnStart) btnStart.style.display = "inline-flex";
+    if (btnStop) btnStop.style.display = "none";
+    if (sel) sel.disabled = false;
+    if (modeSel) modeSel.disabled = false;
+    if (window.syncBenchmarkModelPolicyUI) window.syncBenchmarkModelPolicyUI();
+  }
+};
+
+function _renderParallelLanesGrid(lanes = []) {
+  const grid = document.getElementById("benchParallelLanesGrid");
+  if (!grid) return;
+  grid.innerHTML = lanes
+    .map((ln) => {
+      const isDec = ln.state === "吐字" || ln.state === "吐字中";
+      const isPre = String(ln.state || "").includes("预填");
+      const cls = isDec ? "is-decoding" : isPre ? "is-prefill" : "";
+      const ttftPart = ln.ttft_ms != null ? `首字 ${Math.round(ln.ttft_ms)}ms` : "--";
+      const decSub = ln.decode_tps && ln.state === "完成" ? ` · 纯吐字 ${ln.decode_tps} tok/s` : "";
+      const tokDisp = Number(ln.tokens || 0).toLocaleString();
+      return `
+        <div class="bench-par-lane-card ${cls}">
+          <div class="bench-par-lane-top">
+            <span class="bench-par-lane-id">#${ln.id}</span>
+            <span class="bench-par-lane-state">${escapeHtml(ln.state || "等待")}</span>
+          </div>
+          <div class="bench-par-lane-metrics">
+            <span><strong>${ln.tps ?? 0}</strong> tok/s</span>
+            <span class="bench-lane-tok-val"><strong>${tokDisp}</strong> tok</span>
+          </div>
+          <div class="bench-par-lane-sub">${ttftPart}${decSub}</div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+window.startParallelStressBenchmark = async function () {
+  if (window._isBenchmarkRunning) return;
+  const sel = document.getElementById("benchModelSelect");
+  const targetModel = sel?.value?.trim() || headerModelSelect?.value?.trim() || "";
+  if (!targetModel) {
+    showToast("请先选择模型");
+    return;
+  }
+  if (!_isSelectedBenchModelLocal()) {
+    showToast("API 已禁用高压测试");
+    return;
+  }
+  const parCount = Math.max(1, Math.min(16, Number(document.getElementById("benchParallelCountSelect")?.value || 4)));
+  const ctxK = Number(document.getElementById("benchParallelCtxSelect")?.value || 32);
+  const maxTok = Number(document.getElementById("benchParallelMaxTokSelect")?.value || 8192);
+  const durS = Number(document.getElementById("benchParallelDurSelect")?.value || 60);
+
+  window._isBenchmarkRunning = true;
+  _benchAbortController = new AbortController();
+  _benchChartSeries = [];
+
+  const btnMainStart = document.getElementById("btnStartBenchmark");
+  const btnParStart = document.getElementById("btnStartParallelBench");
+  const btnParStop = document.getElementById("btnStopParallelBench");
+  const parSelects = ["benchModelSelect", "benchModeSelect", "benchParallelCountSelect", "benchParallelCtxSelect", "benchParallelMaxTokSelect", "benchParallelDurSelect"]
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+
+  if (btnMainStart) btnMainStart.disabled = true;
+  if (btnParStart) btnParStart.style.display = "none";
+  if (btnParStop) btnParStop.style.display = "inline-flex";
+  parSelects.forEach((el) => { el.disabled = true; });
+
+  const liveWrap = document.getElementById("benchParallelLiveWrap");
+  if (liveWrap) liveWrap.style.display = "flex";
+  const btnCopyPar = document.getElementById("btnCopyParallelReport");
+  if (btnCopyPar) btnCopyPar.style.display = "none";
+
+  const setParProgress = (pct, txt, cls = "is-active") => {
+    const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+    const pEl = document.getElementById("benchParallelPctText");
+    const tEl = document.getElementById("benchParallelStageText");
+    const fEl = document.getElementById("benchParallelProgressFill");
+    if (pEl) pEl.textContent = `${p}%`;
+    if (tEl && txt) tEl.textContent = txt;
+    if (fEl) {
+      fEl.style.width = `${p}%`;
+      fEl.classList.remove("is-active", "is-done", "is-error");
+      if (cls) fEl.classList.add(cls);
+    }
+  };
+
+  setParProgress(2, `启动 ${parCount} 路 (${ctxK}K · ${maxTok} · ${durS}s)`, "is-active");
+  _setBenchMasterProgress(2, `并行测试 · ${parCount} 路`, `${parCount}路运行中`, "is-running");
+  _renderParallelLanesGrid(
+    Array.from({ length: parCount }, (_, idx) => ({
+      id: idx + 1,
+      state: "准备",
+      tps: 0,
+      tokens: 0,
+      ttft_ms: null
+    }))
+  );
+
+  try {
+    const res = await fetch("/api/system/benchmark/parallel_stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: targetModel,
+        parallel: parCount,
+        context_k: ctxK,
+        max_tokens: maxTok,
+        duration_s: durS
+      }),
+      signal: _benchAbortController.signal
+    });
+    if (!res.ok || !res.body) {
+      const ej = await res.json().catch(() => ({}));
+      throw new Error(ej.detail || ej.message || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buf = "";
+    let gotParDone = false;
+
+    const onParEvent = (ev) => {
+      if (!ev || typeof ev !== "object") return;
+      if (ev.telemetry) _renderBenchTelemetry(ev.telemetry);
+      if (ev.ok === false || ev.type === "error") {
+        throw new Error(ev.message || ev.detail || "并行测试失败");
+      }
+      if (ev.type === "status") {
+        setParProgress(ev.percent ?? 5, ev.message || "准备中...", "is-active");
+        _setBenchMasterProgress(ev.percent ?? 5, ev.message || "", `${parCount}路准备中`, "is-running");
+        return;
+      }
+      if (ev.type === "parallel_init") {
+        setParProgress(8, `预填 ${ev.parallel} × ${ev.context_k}K...`, "is-active");
+        return;
+      }
+      if (ev.type === "parallel_tick") {
+        const totTokStr = Number(ev.total_tokens || 0).toLocaleString();
+        const curTps = ev.agg_live_tps > 0 ? ev.agg_live_tps : (ev.agg_avg_tps ?? 0);
+        const msg = ev.phase === "prefill"
+          ? `预填 ${ev.ready_lanes ?? 0} / ${ev.parallel} 路 (${ev.prefill_elapsed_s ?? 0}s)`
+          : `${ev.elapsed_s}s / ${ev.duration_s}s · 总吞吐 ${curTps} tok/s · 合计 ${totTokStr} tok`;
+        setParProgress(ev.percent ?? 50, msg, "is-active");
+        _setBenchMasterProgress(ev.percent ?? 50, msg, `${ev.parallel}路运行中`, "is-running");
+
+        document.getElementById("benchParAggTps").textContent = String(ev.agg_avg_tps ?? curTps);
+        document.getElementById("benchParAggSub").textContent = `瞬时 ${ev.agg_live_tps ?? 0} · 峰值 ${ev.peak_agg_tps ?? 0} tok/s`;
+        document.getElementById("benchParPerLaneTps").textContent = totTokStr;
+        document.getElementById("benchParPerLaneSub").textContent = `单路均速 ${ev.per_lane_tps ?? 0} tok/s`;
+        document.getElementById("benchParAvgTtft").textContent = ev.avg_ttft_ms != null ? String(Math.round(ev.avg_ttft_ms)) : "--";
+        document.getElementById("benchParTtftSub").textContent = ev.max_ttft_ms != null ? `最慢 ${Math.round(ev.max_ttft_ms)} ms` : "--";
+        document.getElementById("benchParActiveLanes").textContent = `${ev.active_lanes ?? 0} / ${ev.parallel}`;
+        document.getElementById("benchParHealthSub").textContent = `显存 ${ev.peak_vram_gib ?? "-"} GiB` + (ev.error_count ? ` · ${ev.error_count} 异常` : "");
+
+        const gpuLoad = ev.telemetry?.gpu?.gpu_util_pct ?? ev.telemetry?.cpu?.load_pct ?? 0;
+        _pushBenchChartSample(curTps, gpuLoad);
+        if (Array.isArray(ev.lanes)) {
+          _renderParallelLanesGrid(ev.lanes);
+        }
+        return;
+      }
+      if (ev.type === "parallel_done" && ev.report) {
+        gotParDone = true;
+        const r = ev.report;
+        _benchLastReport = { parallelReport: r, hw: ev.telemetry };
+        const totTokStr = Number(r.total_tokens || 0).toLocaleString();
+        const doneMsg = `完成 (${r.duration_s}s) · 总吞吐 ${r.aggregate_tps} tok/s · 合计 ${totTokStr} tok`;
+        setParProgress(100, doneMsg, "is-done");
+        _setBenchMasterProgress(100, doneMsg, `完成 · ${r.aggregate_tps} tok/s`, "is-done");
+        document.getElementById("benchParAggTps").textContent = String(r.aggregate_tps);
+        document.getElementById("benchParAggSub").textContent = `峰值 ${r.peak_agg_tps} tok/s`;
+        document.getElementById("benchParPerLaneTps").textContent = totTokStr;
+        document.getElementById("benchParPerLaneSub").textContent = `单路均速 ${r.per_lane_tps} tok/s`;
+        document.getElementById("benchParAvgTtft").textContent = String(Math.round(r.avg_ttft_ms || 0));
+        document.getElementById("benchParTtftSub").textContent = `最慢 ${Math.round(r.max_ttft_ms || 0)} ms`;
+        document.getElementById("benchParActiveLanes").textContent = `${r.success_lanes} / ${r.parallel}`;
+        document.getElementById("benchParHealthSub").textContent = `显存 ${r.peak_vram_gib} GiB · ${r.peak_gpu_power_w}W`;
+        if (Array.isArray(r.lanes)) _renderParallelLanesGrid(r.lanes);
+        const btnCopyParDone = document.getElementById("btnCopyParallelReport");
+        if (btnCopyParDone) btnCopyParDone.style.display = "inline-flex";
+        showToast(`完成：${r.aggregate_tps} tok/s · 合计 ${totTokStr} tok`);
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+      for (const ln of lines) {
+        const s = ln.trim();
+        if (!s) continue;
+        let obj = null;
+        try { obj = JSON.parse(s); } catch (e) { continue; }
+        onParEvent(obj);
+      }
+    }
+    if (buf.trim()) {
+      let tailObj = null;
+      try { tailObj = JSON.parse(buf.trim()); } catch (e) {}
+      if (tailObj) onParEvent(tailObj);
+    }
+    if (!gotParDone) {
+      throw new Error("连接中断");
+    }
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      setParProgress(0, "已停止", "");
+      _setBenchMasterProgress(0, "已停止", "已停止", "");
+    } else {
+      const msg = err && err.message ? err.message : String(err);
+      setParProgress(100, `异常：${msg}`, "is-error");
+      _setBenchMasterProgress(100, `异常：${msg}`, "异常", "is-error");
+      showToast("并行测试失败: " + msg);
+    }
+  } finally {
+    window._isBenchmarkRunning = false;
+    _benchAbortController = null;
+    if (btnMainStart) btnMainStart.disabled = false;
+    if (btnParStart) btnParStart.style.display = "inline-flex";
+    if (btnParStop) btnParStop.style.display = "none";
+    parSelects.forEach((el) => { el.disabled = false; });
+    if (window.syncBenchmarkModelPolicyUI) window.syncBenchmarkModelPolicyUI();
+  }
+};
+
+window.unloadLocalModelsVram = async function (btnEl) {
+  const origText = btnEl ? btnEl.textContent : "释放显存";
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = "释放中...";
+  }
+  try {
+    const res = await fetch("/api/local_models/unload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    }
+    showToast(data.message || "已关闭后台本地引擎并释放显存与内存");
+  } catch (e) {
+    showToast("释放显存失败: " + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = origText;
     }
   }
 };

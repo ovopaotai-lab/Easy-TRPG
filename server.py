@@ -15,6 +15,8 @@ import hashlib
 import shutil
 import zipfile
 import base64
+import importlib
+import importlib.util
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, quote
 import httpx
@@ -22,7 +24,7 @@ import uvicorn
 import webbrowser
 from PIL import Image
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Callable, Awaitable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -36,12 +38,15 @@ from enterprise_engine import (
     LOCAL_MODELS_CATALOG,
     DEFAULT_UI_MODULES,
     DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT,
+    DEFAULT_FAST_TRPG_SYSTEM_PROMPT,
     upgrade_legacy_global_protocol_prompt,
     normalize_ui_modules,
     build_ui_modules_spec_block,
     build_content_scale_prompt_block,
     build_status_module_prompt,
     is_free_chat_project,
+    is_simple_trpg_project,
+    _detect_system_ram_gib,
     discover_local_models,
     get_installed_local_model_ids,
     normalize_api_endpoint_and_protocol,
@@ -72,6 +77,7 @@ from enterprise_engine import (
     HF_DOWNLOAD_TASKS,
     set_active_web_server_port,
     is_self_workbench_url,
+    _is_loopback_only_url,
 )
 
 # 跟踪后台正在生成的对话任务与实时增量文本，防止手机刷新或网络抖动中断生成
@@ -202,13 +208,15 @@ DEFAULT_SETTINGS = {
     "erotic_level": 0,
     "violence_level": 0,
     "model_params": {},
-    "global_system_protocol_prompt": DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT,
+    "global_system_protocol_prompt": "",
 }
 
-# 默认初始游戏 1：跑团
+# 默认初始游戏 1：高级跑团（完整状态栏 + 默认开启思考）
 DEFAULT_PROJECT = {
     "id": "proj_default",
-    "name": "跑团",
+    "name": "高级跑团",
+    "simple_mode": False,
+    "cot_enabled": True,
     "icon": "",
     "avatar": "",
     "category": "跑团",
@@ -246,9 +254,10 @@ DEFAULT_PROJECT = {
     "ui_modules": [dict(m) for m in DEFAULT_UI_MODULES],
     "system_prompt": (
         "你是一位兼具电影级镜头感与顶级游戏策划功底的【全题材自适应互动叙事主持（AI 导演 / DM）】。\n"
-        "请根据玩家当前选用的【开场白】或挂载的【角色卡】自动适配世界观与文风（奇幻冒险/悬疑跑团/赛博修仙/日常情感张力），始终以极具画面感与感官细节（光影、声响、气味、微表情）的第二人称（「你」）叙事。NPC 拥有独立动机、秘密与性格底线，绝不无脑顺从玩家；严禁代替玩家做决定或抢说玩家台词。"
+        "请根据玩家当前选用的【开场白】或挂载的【角色卡】自动适配世界观与文风（奇幻冒险/悬疑跑团/赛博修仙/日常情感张力），始终以极具画面感与感官细节（光影、声响、气味、微表情）的第二人称（「你」）叙事。NPC 拥有独立动机、秘密与性格底线，绝不无脑顺从玩家；严禁代替玩家做决定或抢说玩家台词。\n\n"
+        + DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT
     ),
-    "system_protocol_prompt": DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT,
+    "system_protocol_prompt": "",
     "prefix": "【玩家行动】",
     "suffix": (
         "【导演执行约束：保持第二人称电影感叙事；用户的回复和自定义剧情发展要合理地通过游戏世界逻辑与真实性进行推演，不要盲目听从用户的命令。每次回复必须严格按照当前已启用的模块顺序完整输出：先写沉浸式剧情正文，随后按系统协议同步已启用的 <status>...</status> 状态栏（每回合在上一轮状态栏基础上继承并更新，保留历史已结识角色关系、已有装备与未消耗物品，严禁因新对话开始或场景切换而删去历史状态栏信息），若启用了行动选项模块则仅在最底部输出唯一一次提问与编号选项（严禁提前或重复输出选项）。】"
@@ -261,18 +270,48 @@ DEFAULT_PROJECT = {
     "updated_at": time.time()
 }
 
+# 默认初始游戏 0：极速跑团（无状态栏 + 自带折叠记忆区 + 默认关闭思考，低配秒回）
+DEFAULT_FAST_TRPG_PROJECT = {
+    "id": "proj_fast_trpg",
+    "name": "极速跑团",
+    "author": "Easy-TRPG",
+    "icon": "",
+    "avatar": "",
+    "category": "极速跑团",
+    "description": "",
+    "tags": [],
+    "simple_mode": True,
+    "cot_enabled": False,
+    "status_panel_enabled": False,
+    "opening_greetings": copy.deepcopy(DEFAULT_PROJECT["opening_greetings"]),
+    "ui_modules": [],
+    "system_prompt": DEFAULT_FAST_TRPG_SYSTEM_PROMPT,
+    "system_protocol_prompt": "",
+    "prefix": "",
+    "suffix": "",
+    "max_context_turns": 10,
+    "erotic_level": 0,
+    "violence_level": 0,
+    "auto_summarize": True,
+    "use_global_params": True,
+    "created_at": time.time(),
+    "updated_at": time.time(),
+}
+
 # 默认初始游戏 2：聊天（100% 纯净网页版 AI，无任何功能栏、无任何提示词、无任何预设开场白）
 DEFAULT_FREE_CHAT_UI_MODULES: List[Dict[str, Any]] = []
 
 DEFAULT_FREE_CHAT_PROJECT = {
     "id": "proj_free_chat",
     "name": "聊天",
+    "simple_mode": False,
+    "cot_enabled": True,
     "icon": "",
     "avatar": "",
     "category": "聊天",
     "description": "",
     "tags": [],
-    "status_panel_enabled": True,
+    "status_panel_enabled": False,
     "opening_greetings": [],
     "ui_modules": [],
     "system_prompt": "",
@@ -373,6 +412,94 @@ def get_user_gallery_dir(username: str) -> Path:
 def get_user_settings_file(username: str) -> Path:
     return get_user_dir(username) / "settings.json"
 
+def build_hardware_adapted_default_settings(base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """首次启动（或点击硬件推荐）时，根据本机显卡显存、内存与本地引擎环境自动分配最佳上下文长度、轮次记忆与默认入口"""
+    cfg = {**copy.deepcopy(DEFAULT_SETTINGS), **(copy.deepcopy(base) if isinstance(base, dict) else {})}
+    vram_mib = detect_gpu_vram_mib()
+    sys_ram_gib = _detect_system_ram_gib()
+    has_local_env = (BASE_DIR / "engine").exists() or bool(get_installed_local_model_ids(cfg.get("custom_model_paths") or []))
+
+    if vram_mib >= 28000 or (sys.platform == "darwin" and sys_ram_gib >= 48):
+        cfg.update({
+            "context_mode": "tokens",
+            "context": 96,
+            "max_context_turns": 96,
+            "max_context_k": 96,
+            "keep_recent_messages": 10,
+            "worldbook_scan_depth": 5,
+            "max_tokens": 8192,
+            "thinking_budget": 1024,
+            "auto_summarize": True,
+            "hw_tier_label": f"旗舰配置 ({round(vram_mib/1024) if vram_mib else sys_ram_gib}G · 96K)",
+        })
+        if base is None:
+            cfg["active_project_id"] = "proj_default"
+    elif vram_mib >= 20000 or (sys.platform == "darwin" and sys_ram_gib >= 32):
+        cfg.update({
+            "context_mode": "tokens",
+            "context": 40,
+            "max_context_turns": 40,
+            "max_context_k": 64,
+            "keep_recent_messages": 8,
+            "worldbook_scan_depth": 5,
+            "max_tokens": 8192,
+            "thinking_budget": 1024,
+            "auto_summarize": True,
+            "hw_tier_label": f"高配显存 ({round(vram_mib/1024) if vram_mib else sys_ram_gib}G · 64K)",
+        })
+        if base is None:
+            cfg["active_project_id"] = "proj_default"
+    elif vram_mib > 10240:
+        cfg.update({
+            "context_mode": "turns",
+            "context": 16,
+            "max_context_turns": 16,
+            "max_context_k": 32,
+            "keep_recent_messages": 6,
+            "worldbook_scan_depth": 4,
+            "max_tokens": 8192,
+            "thinking_budget": 1024,
+            "auto_summarize": True,
+            "hw_tier_label": f"主流独显 ({round(vram_mib/1024)}G · 16轮+32K)",
+        })
+        if base is None:
+            cfg["active_project_id"] = "proj_fast_trpg"
+    elif vram_mib > 0 or has_local_env:
+        v_str = f"{round(vram_mib/1024)}G · " if vram_mib > 0 else ""
+        cfg.update({
+            "context_mode": "turns",
+            "context": 10,
+            "max_context_turns": 10,
+            "max_context_k": 32,
+            "keep_recent_messages": 6,
+            "worldbook_scan_depth": 3,
+            "max_tokens": 8192,
+            "thinking_budget": 1024,
+            "auto_summarize": True,
+            "hw_tier_label": f"轻量极速档 ({v_str}10轮+32K)",
+        })
+        if base is None:
+            cfg["active_project_id"] = "proj_fast_trpg"
+    else:
+        cfg.update({
+            "context_mode": "tokens",
+            "context": 64,
+            "max_context_turns": 64,
+            "max_context_k": 96,
+            "keep_recent_messages": 8,
+            "worldbook_scan_depth": 5,
+            "max_tokens": 8192,
+            "thinking_budget": 1024,
+            "auto_summarize": True,
+            "hw_tier_label": "在线API档 (96K)",
+        })
+        if base is None:
+            cfg["active_project_id"] = "proj_default"
+
+    cfg["hw_profile_initialized"] = True
+    return cfg
+
+
 def load_user_settings(username: str) -> Dict[str, Any]:
     with _USER_SETTINGS_LOCK:
         sfile = get_user_settings_file(username)
@@ -384,11 +511,9 @@ def load_user_settings(username: str) -> Dict[str, Any]:
                 if not isinstance(saved, dict):
                     raise ValueError("settings.json 顶层不是对象")
             except OSError as e:
-                # 文件被短暂占用等 I/O 异常：本次返回默认值，但绝不覆盖原文件
                 print(f"[Warn] 读取用户配置 settings.json 失败 ({e})，本次临时使用默认配置")
                 return copy.deepcopy(DEFAULT_SETTINGS)
             except Exception as e:
-                # 解析失败时绝不直接用默认值覆盖用户配置：先把损坏文件改名保留，便于人工恢复
                 saved = None
                 try:
                     corrupt_path = sfile.with_name(f"settings.json.corrupt-{time.strftime('%Y%m%d_%H%M%S')}")
@@ -399,15 +524,28 @@ def load_user_settings(username: str) -> Dict[str, Any]:
                     return copy.deepcopy(DEFAULT_SETTINGS)
             if isinstance(saved, dict):
                 merged = {**copy.deepcopy(DEFAULT_SETTINGS), **copy.deepcopy(saved)}
-                upgraded_proto = upgrade_legacy_global_protocol_prompt(merged.get("global_system_protocol_prompt"), allow_empty=True)
-                if upgraded_proto != merged.get("global_system_protocol_prompt"):
-                    merged["global_system_protocol_prompt"] = upgraded_proto
+                needs_save = False
+                if (
+                    not saved.get("hw_profile_initialized")
+                    and not str(saved.get("api_key") or "").strip()
+                    and not str(saved.get("base_url") or "").strip()
+                    and not str(saved.get("model") or "").strip()
+                ):
+                    chats_dir = get_user_chats_dir(username)
+                    has_any_chats = any(chats_dir.glob("*.json")) if chats_dir.exists() else False
+                    if not has_any_chats:
+                        merged = build_hardware_adapted_default_settings()
+                        needs_save = True
+                if merged.get("global_system_protocol_prompt"):
+                    merged["global_system_protocol_prompt"] = ""
+                    needs_save = True
+                if needs_save:
                     try:
                         save_user_settings(username, merged)
                     except Exception as e:
-                        print(f"[Warn] 升级全局协议提示词后保存配置失败: {e}")
+                        print(f"[Warn] 保存自动初始化/升级后的配置失败: {e}")
                 return merged
-        default_copy = copy.deepcopy(DEFAULT_SETTINGS)
+        default_copy = build_hardware_adapted_default_settings()
         save_user_settings(username, default_copy)
         return copy.deepcopy(default_copy)
 
@@ -646,11 +784,20 @@ def ensure_user_workspace(username: str):
     settings_path = user_dir / "settings.json"
     projects_dir = user_dir / "projects"
     # 每个请求都会经过这里：旧数据迁移只需每个进程执行一次，避免反复改写项目文件
-    if username in _WORKSPACE_READY and settings_path.exists() \
-            and (projects_dir / "proj_default.json").exists() and (projects_dir / "proj_free_chat.json").exists():
+    if (
+        username in _WORKSPACE_READY
+        and settings_path.exists()
+        and (projects_dir / "proj_fast_trpg.json").exists()
+        and (projects_dir / "proj_default.json").exists()
+        and (projects_dir / "proj_free_chat.json").exists()
+    ):
         return
     if not settings_path.exists():
-        save_user_settings(username, DEFAULT_SETTINGS)
+        save_user_settings(username, build_hardware_adapted_default_settings())
+
+    fast_trpg_path = projects_dir / "proj_fast_trpg.json"
+    if not fast_trpg_path.exists():
+        atomic_write_json(fast_trpg_path, normalize_project_schema(DEFAULT_FAST_TRPG_PROJECT), ensure_ascii=False, indent=2)
 
     default_proj_path = projects_dir / "proj_default.json"
     if not default_proj_path.exists():
@@ -661,8 +808,8 @@ def ensure_user_workspace(username: str):
                 raw_def = json.load(f)
             if isinstance(raw_def, dict):
                 changed_def = False
-                if raw_def.get("name") in ("默认游戏", "跑团游戏"):
-                    raw_def["name"] = "跑团"
+                if raw_def.get("name") in ("默认游戏", "跑团游戏", "跑团"):
+                    raw_def["name"] = "高级跑团"
                     raw_def["description"] = ""
                     changed_def = True
                 if raw_def.get("icon") == "🎲" or raw_def.get("avatar") == "🎲":
@@ -691,21 +838,16 @@ def ensure_user_workspace(username: str):
                     if len(filtered_mods) != len(old_mods):
                         raw_def["ui_modules"] = filtered_mods
                         changed_def = True
-                if "system_protocol_prompt" not in raw_def:
-                    raw_def["system_protocol_prompt"] = DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT
+                legacy_def_proto = str(raw_def.get("system_protocol_prompt") or "").strip()
+                if legacy_def_proto:
+                    upgraded_def_proto = upgrade_legacy_global_protocol_prompt(legacy_def_proto, allow_empty=True).strip()
+                    cur_def_sys = str(raw_def.get("system_prompt") or "").strip()
+                    if upgraded_def_proto and upgraded_def_proto not in cur_def_sys and "1. 【🎲 关键节点检定" not in cur_def_sys:
+                        raw_def["system_prompt"] = f"{cur_def_sys}\n\n{upgraded_def_proto}".strip() if cur_def_sys else upgraded_def_proto
+                    raw_def["system_protocol_prompt"] = ""
                     changed_def = True
                 elif raw_def.get("system_protocol_prompt") is None:
                     raw_def["system_protocol_prompt"] = ""
-                    changed_def = True
-                elif "【系统提示词 · 功能栏与跑团编写协议（可自由修改或清空）】：\n1. 【🎲 关键节点检定" in str(raw_def.get("system_protocol_prompt") or "") and (
-                    "所有栏位缺一不可" not in str(raw_def.get("system_protocol_prompt") or "")
-                    or "唯一一次" not in str(raw_def.get("system_protocol_prompt") or "")
-                    or "(已消耗)x0" not in str(raw_def.get("system_protocol_prompt") or "")
-                    or "6. 【🎬 DM 主动导演节奏" not in str(raw_def.get("system_protocol_prompt") or "")
-                ):
-                    raw_def["system_protocol_prompt"] = upgrade_legacy_global_protocol_prompt(
-                        str(raw_def.get("system_protocol_prompt") or ""), allow_empty=True
-                    ) or DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT
                     changed_def = True
                 cur_def_suffix = str(raw_def.get("suffix") or "").strip()
                 if cur_def_suffix.startswith("【导演执行约束：保持第二人称电影感叙事") and cur_def_suffix != DEFAULT_PROJECT["suffix"]:
@@ -770,7 +912,7 @@ def ensure_user_workspace(username: str):
     # 清理旧版空白「新游戏 #N」中被自动塞入的默认功能栏（含剧情正文栏）、系统提示词与默认开场白
     try:
         for pfile in projects_dir.glob("*.json"):
-            if pfile.name in ("proj_default.json", "proj_free_chat.json"):
+            if pfile.name in ("proj_fast_trpg.json", "proj_default.json", "proj_free_chat.json"):
                 continue
             with open(pfile, "r", encoding="utf-8") as f:
                 raw_p = json.load(f)
@@ -780,21 +922,27 @@ def ensure_user_workspace(username: str):
             p_sys = str(raw_p.get("system_prompt") or "").strip()
             p_mods = raw_p.get("ui_modules")
             p_mod_ids = {str(m.get("id") or "") for m in (p_mods or []) if isinstance(m, dict)}
-            if p_name.startswith("新游戏") and not p_sys:
-                changed_p = False
+            changed_p = False
+            _sp = str(raw_p.get("system_protocol_prompt") or "").strip()
+            if p_name.startswith(("新游戏", "新剧本", "新企划")) and not p_sys:
                 if p_mod_ids and p_mod_ids.issubset({"mod_think", "mod_story", "mod_stats", "mod_equip", "mod_inv", "mod_npc", "mod_info", "mod_choices"}):
                     raw_p["ui_modules"] = []
+                    raw_p["status_panel_enabled"] = False
                     changed_p = True
-                _sp = str(raw_p.get("system_protocol_prompt") or "").strip()
-                if _sp and (_sp == DEFAULT_GLOBAL_SYSTEM_PROTOCOL_PROMPT.strip() or _sp.startswith("【全局底层系统提示词")):
+                if _sp:
                     raw_p["system_protocol_prompt"] = ""
                     changed_p = True
                 raw_og_list = raw_p.get("opening_greetings")
                 if isinstance(raw_og_list, list) and len(raw_og_list) == 1 and isinstance(raw_og_list[0], dict) and raw_og_list[0].get("content") == "开始游戏":
                     raw_p["opening_greetings"] = []
                     changed_p = True
-                if changed_p:
-                    atomic_write_json(pfile, normalize_project_schema(raw_p, raw_p), ensure_ascii=False, indent=2)
+            elif _sp:
+                if _sp not in p_sys:
+                    raw_p["system_prompt"] = f"{p_sys}\n\n{_sp}".strip() if p_sys else _sp
+                raw_p["system_protocol_prompt"] = ""
+                changed_p = True
+            if changed_p:
+                atomic_write_json(pfile, normalize_project_schema(raw_p, raw_p), ensure_ascii=False, indent=2)
     except Exception:
         pass
     _WORKSPACE_READY.add(username)
@@ -954,11 +1102,21 @@ async def _app_lifespan(app_instance: FastAPI):
                 pass
         ACTIVE_BG_TASKS.clear()
         ACTIVE_PARTIAL_TEXT.clear()
-        await shutdown_local_engines()
+        main_mod = sys.modules.get("__main__")
+        is_update_restart = bool(
+            globals().get("_PENDING_RESTART_AFTER_UPDATE", False)
+            or getattr(main_mod, "_PENDING_RESTART_AFTER_UPDATE", False)
+        )
+        if not is_update_restart:
+            ee_live = sys.modules.get("enterprise_engine")
+            if ee_live is not None and hasattr(ee_live, "shutdown_local_engines"):
+                await ee_live.shutdown_local_engines()
+            else:
+                await shutdown_local_engines()
 
 
 # ==================== FastAPI 应用与路由 ====================
-APP_VERSION = "alpha 1.5"
+APP_VERSION = "alpha 1.6"
 _SERVER_BOOT_ID = uuid.uuid4().hex[:10]
 app = FastAPI(title="AI TRPG", version=APP_VERSION, lifespan=_app_lifespan)
 
@@ -1001,7 +1159,11 @@ def read_root(app_id: Optional[str] = None):
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
         raw_html = index_path.read_text(encoding="utf-8")
-        ver_tag = re.sub(r"[^a-zA-Z0-9._-]+", "_", APP_VERSION) + "_" + _SERVER_BOOT_ID
+        try:
+            _st_mtime = max(int(p.stat().st_mtime) for p in STATIC_DIR.glob("*") if p.is_file())
+        except Exception:
+            _st_mtime = 0
+        ver_tag = f"{re.sub(r'[^a-zA-Z0-9._-]+', '_', APP_VERSION)}_{_SERVER_BOOT_ID}_{_st_mtime}" 
         raw_html = re.sub(
             r'(/static/[a-zA-Z0-9._/-]+\.(?:js|css))(?:\?v=[^"\'>\s]*)?',
             rf"\1?v={ver_tag}",
@@ -1364,11 +1526,7 @@ async def update_settings(payload: Dict[str, Any], username: str = Depends(get_c
                 self_url_warnings.append(
                     "检测到填入的是本工作台自己的网页地址，已自动恢复为「自动识别」模式（把 .gguf 放入 model 文件夹即可直接识别，无需填网页地址）"
                 )
-        if any(k in payload for k in ("global_system_protocol_prompt", "erotic_level", "violence_level", "erotic_enabled", "violence_enabled")):
-            if "global_system_protocol_prompt" in payload:
-                raw_gp = payload.get("global_system_protocol_prompt")
-                clean_gp = "" if raw_gp is None else upgrade_legacy_global_protocol_prompt(str(raw_gp), allow_empty=True)
-                current["global_system_protocol_prompt"] = clean_gp
+        if any(k in payload for k in ("erotic_level", "violence_level", "erotic_enabled", "violence_enabled")):
             if "erotic_level" in payload:
                 current["erotic_level"] = max(0, min(5, safe_int(payload.get("erotic_level"), 3)))
             if "violence_level" in payload:
@@ -1387,11 +1545,6 @@ async def update_settings(payload: Dict[str, Any], username: str = Depends(get_c
                         continue
                     is_active_proj = (cand_pfile.stem == active_pid)
                     proj_changed = False
-                    if "global_system_protocol_prompt" in payload and not is_free_chat_project(raw_proj):
-                        existing_sp = str(raw_proj.get("system_protocol_prompt") or "").strip()
-                        if (cand_pfile.stem == "proj_default") or not existing_sp or "【系统提示词 · 功能栏与跑团编写协议" in existing_sp:
-                            raw_proj["system_protocol_prompt"] = current["global_system_protocol_prompt"]
-                            proj_changed = True
                     if is_active_proj:
                         if "erotic_level" in payload:
                             raw_proj["erotic_level"] = current["erotic_level"]
@@ -1447,16 +1600,52 @@ async def update_settings(payload: Dict[str, Any], username: str = Depends(get_c
             except Exception:
                 pass
 
-    new_model = str(current.get("model") or "").strip()
-    if "model" in payload and new_model and new_model != old_model:
-        ep = resolve_model_endpoint(new_model, current)
-        if ep.get("is_local"):
-            asyncio.create_task(ensure_local_engine_ready(new_model))
+    # 严禁在切换模型或保存设置时后台自动预加载本地大模型（避免无故占用数十 GB 显存/内存）；仅在实际发送消息或运行性能测试时按需启动
 
     resp_out: Dict[str, Any] = {"status": "ok", "settings": mask_settings_for_client(current)}
     if self_url_warnings:
         resp_out["self_url_warning"] = "；".join(self_url_warnings)
     return resp_out
+
+
+@app.post("/api/local_models/unload")
+async def unload_local_models_endpoint(_: None = Depends(require_loopback)):
+    """一键停止后台所有本地推理引擎（Strata / Ollama 驻留权重 / llama-server）并释放显存与内存"""
+    unloaded_items: List[str] = []
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=4.0) as client:
+            ps_resp = await client.get("http://127.0.0.1:11434/api/ps")
+            if ps_resp.status_code == 200:
+                for active_m in ps_resp.json().get("models", []):
+                    m_name = active_m.get("name")
+                    if m_name:
+                        await client.post("http://127.0.0.1:11434/api/generate", json={"model": m_name, "keep_alive": 0})
+                        unloaded_items.append(f"Ollama:{m_name}")
+    except Exception:
+        pass
+
+    ee_live = sys.modules.get("enterprise_engine")
+    if ee_live is not None and hasattr(ee_live, "shutdown_local_engines"):
+        await ee_live.shutdown_local_engines()
+    else:
+        await shutdown_local_engines()
+
+    def _sweep_residual_engines() -> None:
+        if os.name == "nt":
+            cf = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            for imgs in (["strata.exe", "strata-vision.exe"], ["llama-server.exe"]):
+                cmd = ["taskkill", "/F"]
+                for im in imgs:
+                    cmd.extend(["/IM", im])
+                cmd.append("/T")
+                try:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=cf, timeout=4)
+                except Exception:
+                    pass
+
+    await asyncio.to_thread(_sweep_residual_engines)
+    detail_suffix = f"（含 {', '.join(unloaded_items)}）" if unloaded_items else ""
+    return {"ok": True, "message": f"已关闭本地推理引擎并释放显存与内存{detail_suffix}"}
 
 @app.post("/api/settings/model_params")
 def update_single_model_params(payload: Dict[str, Any], username: str = Depends(get_current_user)):
@@ -1612,74 +1801,122 @@ async def get_available_models(username: str = Depends(get_current_user)):
         }
 
     raw_models: List[str] = []
+    remote_fetch_error: str = ""
+    used_direct_fallback: bool = False
     # 只要有归一化后的 base_url，且 (用户填了 raw_base_url，或填了 api_key 且识别出了官方协议，或手动选择了非 openai/auto 的自带默认地址协议)
     should_fetch_remote = bool(base_url) and bool(raw_base_url or api_key or api_protocol in ("gemini", "claude", "ollama"))
     if should_fetch_remote:
-        try:
-            headers = dict(norm["headers"])
-            headers.pop("Content-Type", None)
-            async with httpx.AsyncClient(proxy=proxy, trust_env=False, timeout=8.0) as client:
-                models_task = client.get(f"{base_url}/models", headers=headers)
-                pricing_task = client.get(f"{site_root}/api/pricing") if raw_base_url else asyncio.sleep(0, result=None)
-                results = await asyncio.gather(models_task, pricing_task, return_exceptions=True)
+        headers = dict(norm["headers"])
+        headers.pop("Content-Type", None)
+        headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Easy-TRPG/1.5")
+        headers.setdefault("Accept", "application/json")
 
-                resp_models, resp_pricing = results[0], results[1]
-                if resp_pricing is not None and not isinstance(resp_pricing, Exception) and getattr(resp_pricing, "status_code", 0) == 200:
-                    try:
-                        pdata = resp_pricing.json()
-                        if isinstance(pdata, dict):
-                            for item in pdata.get("data", []):
-                                mname = item.get("model_name") if isinstance(item, dict) else None
-                                if mname:
-                                    pricing_map[mname] = _format_model_pricing_entry(item)
-                    except Exception:
-                        pass
+        def _extract_model_ids(resp_obj) -> List[str]:
+            if isinstance(resp_obj, Exception) or getattr(resp_obj, "status_code", 0) != 200:
+                return []
+            try:
+                data = resp_obj.json()
+                items = (
+                    data.get("data")
+                    if isinstance(data, dict) and "data" in data
+                    else (data.get("models") if isinstance(data, dict) and "models" in data else (data if isinstance(data, list) else []))
+                )
+                out: List[str] = []
+                for m in (items or []):
+                    if isinstance(m, dict):
+                        mid = m.get("id") or m.get("name") or ""
+                        if mid.startswith("models/"):
+                            mid = mid[len("models/"):]
+                        if mid:
+                            out.append(mid)
+                    elif isinstance(m, str) and m.strip():
+                        out.append(m.strip())
+                return out
+            except Exception:
+                return []
 
-                def _extract_model_ids(resp_obj) -> List[str]:
-                    if isinstance(resp_obj, Exception) or getattr(resp_obj, "status_code", 0) != 200:
-                        return []
-                    try:
-                        data = resp_obj.json()
-                        items = (
-                            data.get("data")
-                            if isinstance(data, dict) and "data" in data
-                            else (data.get("models") if isinstance(data, dict) and "models" in data else (data if isinstance(data, list) else []))
-                        )
-                        out: List[str] = []
-                        for m in (items or []):
-                            if isinstance(m, dict):
-                                mid = m.get("id") or m.get("name") or ""
-                                if mid.startswith("models/"):
-                                    mid = mid[len("models/"):]
-                                if mid:
-                                    out.append(mid)
-                        return out
-                    except Exception:
-                        return []
+        # 构建代理与直连回退链：若用户在设置中开启了代理但本地代理软件未启动（如 127.0.0.1:7890 拒绝连接），自动无缝回退直连！
+        proxy_candidates: List[Optional[str]] = []
+        if proxy:
+            proxy_candidates.append(proxy)
+            if os.name == "nt":
+                try:
+                    import winreg
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as rk:
+                        p_en, _ = winreg.QueryValueEx(rk, "ProxyEnable")
+                        p_srv, _ = winreg.QueryValueEx(rk, "ProxyServer")
+                        if p_en and p_srv and isinstance(p_srv, str):
+                            sys_px = p_srv.strip()
+                            if "://" not in sys_px and "=" not in sys_px:
+                                sys_px = f"http://{sys_px}"
+                            if sys_px.startswith("http") and sys_px not in proxy_candidates:
+                                proxy_candidates.append(sys_px)
+                except Exception:
+                    pass
+            proxy_candidates.append(None)
+        else:
+            proxy_candidates.append(None)
 
-                raw_models = _extract_model_ids(resp_models)
-                # 若 Gemini 官方 /v1beta/openai/models 未返回，回退尝试原生 /v1beta/models?key=
-                if not raw_models and detected_proto == "gemini" and api_key:
-                    gemini_root = norm["raw_clean_url"] or "https://generativelanguage.googleapis.com"
-                    if gemini_root.endswith("/v1beta/openai"):
-                        gemini_root = gemini_root[:-len("/v1beta/openai")]
-                    resp_gem = await client.get(f"{gemini_root}/v1beta/models", params={"key": api_key})
-                    raw_models = _extract_model_ids(resp_gem)
-                # 若 Ollama /v1/models 未返回，回退尝试 /api/tags
-                if not raw_models and detected_proto == "ollama":
-                    ollama_root = base_url[:-3] if base_url.endswith("/v1") else base_url
-                    resp_ol = await client.get(f"{ollama_root}/api/tags")
-                    raw_models = _extract_model_ids(resp_ol)
-                # 若用户填写了不含 /v1 的地址且归一化补全后的地址成功拿到模型，同步保存归一化地址（重读最新配置避免覆盖并发保存）
-                if raw_models and raw_base_url and base_url != raw_base_url:
-                    with _USER_SETTINGS_LOCK:
-                        latest_s = load_user_settings(username)
-                        if (latest_s.get("base_url") or "").strip().rstrip("/") == raw_base_url:
-                            latest_s["base_url"] = base_url
-                            save_user_settings(username, latest_s)
-                            settings = latest_s
-        except Exception as e:
-            print(f"获取模型列表或价格失败: {e}")
+        for cand_idx, cur_proxy in enumerate(proxy_candidates):
+            try:
+                async with httpx.AsyncClient(proxy=cur_proxy, trust_env=False, timeout=8.0, follow_redirects=True) as client:
+                    models_task = client.get(f"{base_url}/models", headers=headers)
+                    pricing_task = client.get(f"{site_root}/api/pricing") if raw_base_url else asyncio.sleep(0, result=None)
+                    results = await asyncio.gather(models_task, pricing_task, return_exceptions=True)
+
+                    resp_models, resp_pricing = results[0], results[1]
+                    if resp_pricing is not None and not isinstance(resp_pricing, Exception) and getattr(resp_pricing, "status_code", 0) == 200:
+                        try:
+                            pdata = resp_pricing.json()
+                            if isinstance(pdata, dict):
+                                for item in pdata.get("data", []):
+                                    mname = item.get("model_name") if isinstance(item, dict) else None
+                                    if mname:
+                                        pricing_map[mname] = _format_model_pricing_entry(item)
+                        except Exception:
+                            pass
+
+                    if isinstance(resp_models, Exception):
+                        remote_fetch_error = f"连接失败 ({type(resp_models).__name__})"
+                        continue
+                    st_code = getattr(resp_models, "status_code", 0)
+                    if st_code in (401, 403):
+                        remote_fetch_error = f"API Key 鉴权失败或被拦截 (HTTP {st_code})"
+                    elif st_code >= 400:
+                        remote_fetch_error = f"接口返回 HTTP {st_code}"
+
+                    raw_models = _extract_model_ids(resp_models)
+                    # 若 Gemini 官方 /v1beta/openai/models 未返回，回退尝试原生 /v1beta/models?key=
+                    if not raw_models and detected_proto == "gemini" and api_key:
+                        gemini_root = norm["raw_clean_url"] or "https://generativelanguage.googleapis.com"
+                        if gemini_root.endswith("/v1beta/openai"):
+                            gemini_root = gemini_root[:-len("/v1beta/openai")]
+                        resp_gem = await client.get(f"{gemini_root}/v1beta/models", params={"key": api_key})
+                        raw_models = _extract_model_ids(resp_gem)
+                    # 若 Ollama /v1/models 未返回，回退尝试 /api/tags
+                    if not raw_models and detected_proto == "ollama":
+                        ollama_root = base_url[:-3] if base_url.endswith("/v1") else base_url
+                        resp_ol = await client.get(f"{ollama_root}/api/tags")
+                        raw_models = _extract_model_ids(resp_ol)
+
+                    if raw_models:
+                        remote_fetch_error = ""
+                        if proxy and cur_proxy is None and cand_idx > 0:
+                            used_direct_fallback = True
+                        # 若用户填写了不含 /v1 的地址且归一化补全后的地址成功拿到模型，同步保存归一化地址
+                        if raw_base_url and base_url != raw_base_url:
+                            with _USER_SETTINGS_LOCK:
+                                latest_s = load_user_settings(username)
+                                if (latest_s.get("base_url") or "").strip().rstrip("/") == raw_base_url:
+                                    latest_s["base_url"] = base_url
+                                    save_user_settings(username, latest_s)
+                                    settings = latest_s
+                        break
+                    if st_code in (401, 403):
+                        break
+            except Exception as e:
+                remote_fetch_error = f"网络异常: {e}"
+                print(f"获取模型列表或价格失败 (proxy={cur_proxy}): {e}")
 
     local_ids = [m["id"] for m in combined_local_catalog]
     if not raw_models and pricing_map:
@@ -1706,6 +1943,8 @@ async def get_available_models(username: str = Depends(get_current_user)):
         "status": "ok",
         "models": all_known_ids,
         "remote_models": raw_models,
+        "remote_fetch_error": remote_fetch_error,
+        "used_direct_fallback": used_direct_fallback,
         "custom_models": custom_models,
         "local_models": local_models_list,
         "recommendations": recommendations,
@@ -1718,6 +1957,14 @@ async def get_available_models(username: str = Depends(get_current_user)):
     }
 
 # ==================== 项目 / 应用编排 API (用户隔离，1:1 完整企业级 Schema) ====================
+@app.post("/api/settings/hardware_recommend")
+def apply_hardware_recommended_settings(username: str = Depends(get_current_user)):
+    with _USER_SETTINGS_LOCK:
+        cur = load_user_settings(username)
+        tuned = build_hardware_adapted_default_settings(base=cur)
+        save_user_settings(username, tuned)
+    return {"status": "ok", "settings": tuned, "hw_tier_label": tuned.get("hw_tier_label", "")}
+
 @app.get("/api/projects")
 def list_projects(username: str = Depends(get_current_user)):
     ensure_user_workspace(username)
@@ -1734,11 +1981,13 @@ def list_projects(username: str = Depends(get_current_user)):
 
     def _proj_sort_key(item: Dict[str, Any]):
         pid = item.get("id", "")
-        if pid == "proj_default":
+        if pid == "proj_fast_trpg":
             return (0, 0)
-        if pid == "proj_free_chat":
+        if pid == "proj_default":
             return (1, 0)
-        return (2, -float(item.get("updated_at", 0) or 0))
+        if pid == "proj_free_chat":
+            return (2, 0)
+        return (3, -float(item.get("updated_at", 0) or 0))
 
     projects.sort(key=_proj_sort_key)
     return projects
@@ -1783,13 +2032,7 @@ def save_project(payload: Dict[str, Any], username: str = Depends(get_current_us
         if not latest_settings.get("active_project_id"):
             latest_settings["active_project_id"] = project_id
             settings_changed = True
-        if (
-            "system_protocol_prompt" in payload
-            and latest_settings.get("active_project_id") == project_id
-            and not is_free_chat_project(data)
-        ):
-            latest_settings["global_system_protocol_prompt"] = data.get("system_protocol_prompt", "")
-            settings_changed = True
+
         if settings_changed:
             save_user_settings(username, latest_settings)
 
@@ -1798,7 +2041,7 @@ def save_project(payload: Dict[str, Any], username: str = Depends(get_current_us
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: str, username: str = Depends(get_current_user)):
     project_id = sanitize_id(project_id)
-    if project_id in ("proj_default", "proj_free_chat"):
+    if project_id in ("proj_fast_trpg", "proj_default", "proj_free_chat"):
         raise HTTPException(status_code=400, detail="默认剧本不可删除")
     file_path = get_user_projects_dir(username) / f"{project_id}.json"
     if file_path.exists():
@@ -2192,6 +2435,31 @@ def _strip_historical_status_block(text: str) -> str:
     return cleaned if cleaned else text
 
 
+def _strip_distilled_artifact_tags(text: str) -> str:
+    """清除部分微调量化模型蒸馏语料中残留的 <localjavatoolN> 伪工具占位标签，防止污染后续轮次上下文诱发提前截断"""
+    if not text or "localjavatool" not in text.lower():
+        return text
+    cleaned = re.sub(r"</?localjavatool\d*\s*>", "", text, flags=re.I)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip() if cleaned.strip() else cleaned
+
+
+def _strip_historical_memory_block(text: str) -> str:
+    """剥离远期历史轮次中已过期的 <memory>...</memory> 记忆区（最近 2 轮完整保留长期+短期记忆，磁盘聊天记录 100% 原样保留）"""
+    text = _strip_distilled_artifact_tags(text)
+    if not text or ("<memory" not in text.lower() and "＜memory＞" not in text.lower()):
+        return text
+    cleaned = re.sub(
+        r"```(?:xml|html|text|markdown|memory)?\s*<memory(?:\s+[^>]*)?>[\s\S]*?</memory>\s*```",
+        "",
+        text,
+        flags=re.I,
+    )
+    cleaned = re.sub(r"<memory(?:\s+[^>]*)?>[\s\S]*?</memory>", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"＜memory＞[\s\S]*?＜/memory＞", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned if cleaned else text
+
+
 async def generate_summary(existing_summary: str, messages_to_compress: List[Dict[str, Any]], settings: Dict[str, Any], model_override: str = "") -> Optional[str]:
     """调用当前对话的大模型将历史长对话归档为详实的数千字剧情前情与状态档案（不作激进删减）
     返回新生成的总结；失败/无可压缩内容时返回 None（调用方据此决定是否推进 summarized_count，避免静默丢弃历史）"""
@@ -2269,6 +2537,14 @@ async def generate_summary(existing_summary: str, messages_to_compress: List[Dic
             sum_req_json["chat_template_kwargs"] = {"enable_thinking": False}
             sum_req_json["repetition_penalty"] = 1.08
             sum_req_json["penalty_last_n"] = 2048
+        elif ep["engine"] == "llama":
+            sum_req_json["stop"] = list(_LOCAL_STOP_SEQUENCES)
+            sum_req_json["reasoning_budget"] = 0
+            sum_req_json["chat_template_kwargs"] = {"enable_thinking": False}
+            sum_req_json["repeat_penalty"] = 1.08
+            sum_req_json["repeat_last_n"] = 2048
+            sum_req_json["frequency_penalty"] = 0.12
+            sum_req_json["cache_prompt"] = True
         elif ep["engine"] == "ollama":
             safe_sum_ctx = get_optimal_ollama_num_ctx(
                 safe_int(settings.get("max_context_k"), 96),
@@ -2688,6 +2964,7 @@ class SendMessageRequest(BaseModel):
     violence_level: Optional[int] = None
     erotic_enabled: Optional[bool] = None
     violence_enabled: Optional[bool] = None
+    cot_enabled: Optional[bool] = None
 
 @app.post("/api/chat/stream")
 async def chat_stream(req: SendMessageRequest, username: str = Depends(get_current_user)):
@@ -2732,6 +3009,8 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
         with open(proj_file, "r", encoding="utf-8") as f:
             raw_proj = json.load(f)
             project_data = normalize_project_schema(raw_proj, raw_proj, global_defaults=settings)
+    elif project_id == "proj_fast_trpg":
+        project_data = normalize_project_schema(DEFAULT_FAST_TRPG_PROJECT, global_defaults=settings)
     elif project_id == "proj_free_chat":
         project_data = normalize_project_schema(DEFAULT_FREE_CHAT_PROJECT, global_defaults=settings)
     else:
@@ -2793,12 +3072,7 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
         prompt_vars,
         chat_inputs
     )
-    raw_global_setting_proto = str(settings.get("global_system_protocol_prompt") or "")
-    global_proto = interpolate_variables(
-        upgrade_legacy_global_protocol_prompt(raw_global_setting_proto, allow_empty=True),
-        prompt_vars,
-        chat_inputs
-    )
+    global_proto = ""
     proj_for_spec = dict(project_data)
     if req.erotic_level is not None:
         proj_for_spec["erotic_level"] = max(0, min(5, safe_int(req.erotic_level, 3)))
@@ -2820,12 +3094,16 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
     )
     if status_mod_prompt:
         base_system_prompt = f"{base_system_prompt}\n\n{status_mod_prompt.strip()}".strip() if base_system_prompt else status_mod_prompt.strip()
-    base_prefix = interpolate_variables(project_data.get("prefix", "").strip(), prompt_vars, chat_inputs)
-    raw_base_suffix = re.sub(r"\n*【当前内容尺度控制[\s\S]*$", "", project_data.get("suffix", "")).strip()
-    base_suffix = interpolate_variables(raw_base_suffix, prompt_vars, chat_inputs)
-    scale_suffix_block = build_content_scale_prompt_block(proj_for_spec).strip()
-    if scale_suffix_block:
-        base_suffix = f"{base_suffix}\n{scale_suffix_block}".strip() if base_suffix else scale_suffix_block
+    if is_simple_trpg_project(project_data):
+        base_prefix = ""
+        base_suffix = ""
+    else:
+        base_prefix = interpolate_variables(project_data.get("prefix", "").strip(), prompt_vars, chat_inputs)
+        raw_base_suffix = re.sub(r"\n*【当前内容尺度控制[\s\S]*$", "", project_data.get("suffix", "")).strip()
+        base_suffix = interpolate_variables(raw_base_suffix, prompt_vars, chat_inputs)
+        scale_suffix_block = build_content_scale_prompt_block(proj_for_spec).strip()
+        if scale_suffix_block:
+            base_suffix = f"{base_suffix}\n{scale_suffix_block}".strip() if base_suffix else scale_suffix_block
     context_mode = str(comp_params.get("context_mode") or (settings.get("context_mode", "turns") if use_global else proj_cp.get("context_mode", "turns")))
     if context_mode not in ("turns", "tokens"):
         context_mode = "turns"
@@ -3008,7 +3286,7 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
         user_final_text = f"{final_prefix}\n{user_final_text}".strip()
     if final_suffix:
         user_final_text = f"{user_final_text}\n{final_suffix}".strip()
-    if (project_data.get("status_panel_enabled", True) is not False) and not is_free_chat_project(project_data):
+    if (project_data.get("status_panel_enabled", True) is not False) and not is_free_chat_project(project_data) and not is_simple_trpg_project(project_data):
         _turn_mods = normalize_ui_modules(project_data.get("ui_modules"))
         _turn_st_keys = [
             str(m.get("key") or "").strip()
@@ -3079,7 +3357,7 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
         if hm.get("role") == "assistant":
             hm_txt = strip_thinking_blocks(hm.get("content", ""))
             if idx_u not in keep_status_pre_set:
-                hm_txt = _strip_historical_status_block(hm_txt)
+                hm_txt = _strip_historical_memory_block(_strip_historical_status_block(hm_txt))
         else:
             hm_txt = hm.get("content", "")
         unsummarized_hist_tok += _est_msg_tokens(hm_txt)
@@ -3131,7 +3409,15 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
     # UI 是否展示折叠思考卡片（think_mod_enabled）与底层模型是否开启后台思考推演（model_think_enabled）彻底解耦：
     # 只要 thinking_budget > 0，本地模型即可在受控硬上限内先做简短导演规划，前端未挂载思考栏时自动静默隐藏
     think_mod_enabled = bool(think_mod_obj and think_mod_obj.get("enabled", True) is not False)
-    model_think_enabled = bool(thinking_budget > 0)
+    is_simple_trpg = is_simple_trpg_project(project_data)
+    effective_cot_on = (
+        bool(req.cot_enabled)
+        if req.cot_enabled is not None
+        else bool(project_data.get("cot_enabled", False if is_simple_trpg else True))
+    )
+    if effective_cot_on and thinking_budget <= 0:
+        thinking_budget = 1024
+    model_think_enabled = bool(effective_cot_on and thinking_budget > 0)
 
     async def _assemble_turn_context() -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[str]]:
         cur_fixed_tok = (
@@ -3154,7 +3440,7 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                 m_txt = strip_thinking_blocks(m.get("content", ""))
                 seen_asst_rev += 1
                 if seen_asst_rev > 2:
-                    m_txt = _strip_historical_status_block(m_txt)
+                    m_txt = _strip_historical_memory_block(_strip_historical_status_block(m_txt))
             else:
                 m_txt = m.get("content", "")
             m_tok = _est_msg_tokens(m_txt)
@@ -3240,9 +3526,9 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                     assembled_msgs.append({"role": "user", "content": h_text})
             elif role == "assistant":
                 raw_asst = h.get("content", "")
-                clean_asst = strip_thinking_blocks(raw_asst) or raw_asst
+                clean_asst = _strip_distilled_artifact_tags(strip_thinking_blocks(raw_asst) or raw_asst)
                 if idx_h not in recent_full_status_asst_idxs:
-                    clean_asst = _strip_historical_status_block(clean_asst)
+                    clean_asst = _strip_historical_memory_block(_strip_historical_status_block(clean_asst))
                 assembled_msgs.append({"role": "assistant", "content": clean_asst})
 
         cur_turn_images = list(effective_turn_user_images)
@@ -3340,8 +3626,11 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
         collected_chunks: List[str] = []
         model_candidates = [model]
         last_err_str: Optional[str] = None
-        is_trpg_stream = (project_data.get("status_panel_enabled", True) is not False) and not is_free_chat_project(project_data)
-        stream_choices_enabled = any(
+        is_trpg_stream = (
+            ((project_data.get("status_panel_enabled", True) is not False) or is_simple_trpg)
+            and not is_free_chat_project(project_data)
+        )
+        stream_choices_enabled = is_simple_trpg or any(
             isinstance(m, dict) and m.get("enabled", True) is not False and (str(m.get("type") or "") == "action_choices" or str(m.get("id") or "") == "mod_choices")
             for m in ui_mods_norm
         )
@@ -3435,7 +3724,7 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                 or (abs(eff_rep_pen - 1.05) < 1e-6 and abs(eff_pres_pen - 0.25) < 1e-6 and abs(eff_freq_pen - 0.0) < 1e-6)
                             )
                             if is_default_or_legacy:
-                                if ep.get("engine") == "ollama":
+                                if ep.get("engine") in ("llama", "ollama"):
                                     eff_rep_pen = 1.03
                                     eff_freq_pen = 0.0
                                     eff_pres_pen = 0.10
@@ -3451,8 +3740,8 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                             "top_p": top_p,
                             "stream": True
                         }
-                        if eff_max_tok > 0:
-                            req_body["max_tokens"] = eff_max_tok
+                        total_output_budget = eff_max_tok if eff_max_tok > 0 else 8192
+                        req_body["max_tokens"] = total_output_budget
                         if ep.get("protocol") not in ("claude", "gemini"):
                             if ep["is_local"] or eff_pres_pen != 0:
                                 req_body["presence_penalty"] = eff_pres_pen
@@ -3463,9 +3752,10 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                         max_think_chars_guard = 0
                         if ep["is_local"]:
                             req_body["stop"] = list(_LOCAL_STOP_SEQUENCES)
+                            max_allowed_think = max(0, total_output_budget - 512)
                             safe_think_budget = (
-                                min(max(256, thinking_budget), 1536)
-                                if model_think_enabled
+                                min(max(256, thinking_budget), 1536, max_allowed_think)
+                                if (model_think_enabled and max_allowed_think >= 256)
                                 else 0
                             )
                             if ep["engine"] == "strata":
@@ -3482,17 +3772,34 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                 req_body["penalty_last_n"] = 1024
                                 req_body["top_k"] = top_k
                                 req_body["min_p"] = min_p
+                            elif ep["engine"] == "llama":
+                                req_body["max_tokens"] = total_output_budget
+                                if safe_think_budget > 0:
+                                    capped_local_think = min(safe_think_budget, 1536)
+                                    req_body["reasoning_budget"] = capped_local_think
+                                    req_body["chat_template_kwargs"] = {"enable_thinking": True}
+                                    max_think_chars_guard = max(900, int(capped_local_think * 2.2))
+                                else:
+                                    req_body["reasoning_budget"] = 0
+                                    req_body["chat_template_kwargs"] = {"enable_thinking": False}
+                                req_body["repeat_penalty"] = eff_rep_pen
+                                req_body["repeat_last_n"] = 1024
+                                req_body["top_k"] = top_k
+                                req_body["min_p"] = min_p
+                                req_body["dry_multiplier"] = 0.8
+                                req_body["cache_prompt"] = True
                             elif ep["engine"] == "ollama":
+                                # 所有模型统一口径：单次最大输出 (默认 8192) 总量包含 CoT 思考与正文
+                                ollama_total_predict = total_output_budget
+                                req_body["max_tokens"] = ollama_total_predict
                                 if safe_think_budget > 0:
                                     capped_local_think = min(safe_think_budget, 1024)
                                     req_body["think"] = True
                                     req_body["thinking_budget_tokens"] = capped_local_think
                                     req_body["reasoning_budget"] = capped_local_think
                                     req_body["reasoning_budget_tokens"] = capped_local_think
-                                    ollama_total_predict = (eff_max_tok if eff_max_tok > 0 else 8192) + capped_local_think
-                                    req_body["max_tokens"] = ollama_total_predict
                                     # Ollama /v1/chat/completions 不支持原生思考预算硬截断，启用流式熔断器严防雷霆思考十分钟
-                                    max_think_chars_guard = max(450, int(capped_local_think * 1.5))
+                                    max_think_chars_guard = max(900, int(capped_local_think * 2.0))
                                 else:
                                     req_body["think"] = False
                                     req_body["reasoning_effort"] = "none"
@@ -3500,7 +3807,6 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                     req_body["reasoning_budget"] = 0
                                     req_body["reasoning_budget_tokens"] = 0
                                     req_body["chat_template_kwargs"] = {"enable_thinking": False}
-                                    ollama_total_predict = eff_max_tok if eff_max_tok > 0 else 8192
                                 safe_num_ctx = get_optimal_ollama_num_ctx(
                                     max_context_k if max_context_k else 96,
                                     ep.get("gguf_path", ""),
@@ -3803,7 +4109,8 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                 else:
                                     cont_msgs.append({"role": "user", "content": outline_note.strip()})
 
-                                cont_max_tok = eff_max_tok if eff_max_tok > 0 else 8192
+                                used_think_tok = min(safe_think_budget or 1024, max(1, int(len(trunc_think) * 0.65)))
+                                cont_max_tok = max(256, total_output_budget - used_think_tok)
                                 cont_body = copy.deepcopy(req_body)
                                 cont_body["messages"] = cont_msgs
                                 cont_body["max_tokens"] = cont_max_tok
@@ -3917,13 +4224,23 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                 if not think_mod_enabled:
                     full_reply = strip_thinking_blocks(full_reply)
 
+                cleaned_artifacts = _strip_distilled_artifact_tags(full_reply)
+                if cleaned_artifacts != full_reply:
+                    full_reply = cleaned_artifacts
+                    ACTIVE_PARTIAL_TEXT[req.chat_id] = full_reply
+                    await event_queue.put({"replace": full_reply})
+
                 # 执行 AI 回复的持久化正则替换 (is_only_render=False)
                 full_reply, rx_ai = apply_regex_scripts(full_reply, regex_list, target_scope=1, only_persistent=True)
                 prompt_log_snapshot["applied_regex"].extend(rx_ai)
 
                 # 万物模块顺序归一化与跑团缺漏模块自动自愈补全
                 try:
-                    is_trpg_active = (project_data.get("status_panel_enabled", True) is not False) and not is_free_chat_project(project_data)
+                    is_trpg_active = (
+                        (project_data.get("status_panel_enabled", True) is not False)
+                        and not is_free_chat_project(project_data)
+                        and not is_simple_trpg
+                    )
                     enabled_ui_mods = [
                         m for m in ui_mods_norm
                         if isinstance(m, dict) and m.get("enabled", True) is not False and str(m.get("id") or "") != "mod_scale"
@@ -3935,10 +4252,18 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                         if str(m.get("type") or "progress_stats") in STATUS_SUBMODULE_TYPES and str(m.get("key") or "").strip()
                     ]
                     active_status_keys = [str(m.get("key") or "").strip() for m in active_status_mods if str(m.get("key") or "").strip()]
-                    post_trim = _detect_and_trim_stream_loop(full_reply, is_trpg=is_trpg_active, expect_choices=choices_mod_enabled)
+                    post_trim = _detect_and_trim_stream_loop(
+                        full_reply,
+                        is_trpg=is_trpg_active,
+                        expect_choices=(choices_mod_enabled if is_trpg_active else False),
+                    )
                     if post_trim is not None and post_trim.strip():
                         full_reply = post_trim
-                    norm_parts = split_ai_message_modules(full_reply, active_status_keys)
+                    norm_parts = (
+                        split_ai_message_modules(full_reply, active_status_keys)
+                        if is_trpg_active
+                        else {"think": "", "story": "", "status": "", "choices": ""}
+                    )
 
                     async def _run_self_heal_stream(heal_messages: List[Dict[str, Any]], heal_max_tokens: int = 2048, on_partial=None) -> str:
                         heal_ep = resolve_model_endpoint(model_candidates[0], settings)
@@ -3950,7 +4275,7 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                 or (abs(heal_rep - 1.05) < 1e-6 and abs(heal_pres - 0.20) < 1e-6 and abs(heal_freq - 0.05) < 1e-6)
                             )
                             if heal_is_default:
-                                if heal_ep.get("engine") == "ollama":
+                                if heal_ep.get("engine") in ("llama", "ollama"):
                                     heal_rep, heal_pres, heal_freq = 1.03, 0.10, 0.0
                                 else:
                                     heal_rep, heal_pres, heal_freq = 1.05, 0.20, 0.05
@@ -3975,6 +4300,12 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                 heal_body["chat_template_kwargs"] = {"enable_thinking": False}
                                 heal_body["repetition_penalty"] = heal_rep
                                 heal_body["penalty_last_n"] = 2048
+                            elif heal_ep["engine"] == "llama":
+                                heal_body["reasoning_budget"] = 0
+                                heal_body["chat_template_kwargs"] = {"enable_thinking": False}
+                                heal_body["repeat_penalty"] = heal_rep
+                                heal_body["repeat_last_n"] = 2048
+                                heal_body["cache_prompt"] = True
                             elif heal_ep["engine"] == "ollama":
                                 heal_body["think"] = False
                                 heal_body["reasoning_effort"] = "none"
@@ -4136,7 +4467,12 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                     ACTIVE_PARTIAL_TEXT[req.chat_id] = preview_full
                                     await event_queue.put({"replace": preview_full})
 
-                            compact_ctx_msgs = ([api_messages[0]] if api_messages and api_messages[0].get("role") == "system" else []) + list(api_messages[-2:])
+                            heal_ep_chk = resolve_model_endpoint(model_candidates[0], settings)
+                            compact_ctx_msgs = (
+                                list(api_messages)
+                                if heal_ep_chk.get("is_local")
+                                else (([api_messages[0]] if api_messages and api_messages[0].get("role") == "system" else []) + list(api_messages[-2:]))
+                            )
                             asst_so_far = norm_parts["story"][-2000:]
                             if norm_parts.get("status"):
                                 asst_so_far = f"{asst_so_far}\n\n{norm_parts['status']}"
@@ -4186,7 +4522,7 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                                 "4. 保持警惕，顺着当前局势继续向前探索推进"
                             )
 
-                    if norm_parts.get("status") or norm_parts.get("choices") or norm_parts.get("story"):
+                    if is_trpg_active and (norm_parts.get("status") or norm_parts.get("choices") or norm_parts.get("story")):
                         new_full_reply = assemble_ai_message_modules(
                             norm_parts.get("think", "") if think_mod_enabled else "",
                             norm_parts.get("story", ""),
@@ -4197,12 +4533,98 @@ async def chat_stream(req: SendMessageRequest, username: str = Depends(get_curre
                             full_reply = new_full_reply
                             ACTIVE_PARTIAL_TEXT[req.chat_id] = full_reply
                             await event_queue.put({"replace": full_reply})
+                    elif not is_free_chat_project(project_data):
+                        # 极速跑团 / 简易卡 (simple_mode=True 或未启用 <status> 状态面板) 的底部行动选项（及 <memory>）断流自动自愈补全：
+                        # 当量化模型写到“你打算怎么做？”或刚写完正文便提前触发 EOS 停止时，毫秒级无思考续写补齐选项，绝不漏选项栏！
+                        sys_p_raw = str(project_data.get("system_prompt") or "") + "\n" + str(project_data.get("system_protocol_prompt") or "")
+                        dangling_ask = bool(
+                            re.search(
+                                r"(?:你打算怎么做|你要怎么做|接下来你[^\n]{0,16}|你的选择|你的抉择|行动选项)[？?：:\s]*$",
+                                full_reply.strip(),
+                            )
+                        )
+                        simple_expects_choices = dangling_ask or bool(
+                            re.search(r"你打算怎么做|行动选项|可选行动|1\.\s*[…\.]{2}|行动分支", sys_p_raw)
+                        )
+                        if simple_expects_choices:
+                            simp_parts = split_ai_message_modules(full_reply, [])
+                            base_story_with_mem = simp_parts.get("story", "").strip()
+                            if not simp_parts.get("choices", "").strip() and len(base_story_with_mem) >= 20:
+                                await event_queue.put({"status": "正在补全底部行动选项..."})
+                                need_mem = ("<memory>" in sys_p_raw.lower()) and ("</memory>" not in base_story_with_mem.lower())
+                                req_simp_lines: List[str] = []
+                                if need_mem:
+                                    req_simp_lines.append(
+                                        "1. 先用 `<memory>...</memory>` 标签输出精炼的 `[长期记忆]：...` 与 `[短期记忆]：...`（总计 180 字以内）；"
+                                    )
+                                req_simp_lines.append(
+                                    ("2. 紧接着在最底部" if need_mem else "请直接在最底部")
+                                    + "输出唯一一次“你打算怎么做？”，并另起新行按 `1.`、`2.`、`3.`、`4.` 给出 4 个紧贴刚才剧情处境的具体行动分支（高风险搏杀或潜行可在句末标 `【🎲XX检定】`，第 4 项可为异想天开破局或 `【自定义行动】___`）。"
+                                )
+                                heal_ep_s = resolve_model_endpoint(model_candidates[0], settings)
+                                simp_ctx_msgs = (
+                                    list(api_messages)
+                                    if heal_ep_s.get("is_local")
+                                    else (([api_messages[0]] if api_messages and api_messages[0].get("role") == "system" else []) + list(api_messages[-2:]))
+                                )
+                                heal_simp_msgs = simp_ctx_msgs + [
+                                    {"role": "assistant", "content": base_story_with_mem[-2400:]},
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "【系统补全指令】：你刚才的正文已写完但提前中断，漏掉了底部的行动选项！"
+                                            "严禁重复输出剧情正文或任何解释，请紧接上面的剧情立即只输出以下缺失部分：\n"
+                                            + "\n".join(req_simp_lines)
+                                        ),
+                                    },
+                                ]
+                                healed_simp_choices = ""
+                                healed_mem_block = ""
+                                try:
+                                    healed_simp_raw = _strip_distilled_artifact_tags(
+                                        await _run_self_heal_stream(heal_simp_msgs, heal_max_tokens=640)
+                                    )
+                                    if healed_simp_raw:
+                                        m_mem_h = re.search(r"(<memory>[\s\S]*?</memory>)", healed_simp_raw, flags=re.I)
+                                        if need_mem and m_mem_h:
+                                            healed_mem_block = m_mem_h.group(1).strip()
+                                        s_tail_parts = split_ai_message_modules(healed_simp_raw, [])
+                                        if s_tail_parts.get("choices"):
+                                            healed_simp_choices = s_tail_parts["choices"].strip()
+                                except Exception as hs_e:
+                                    print(f"[Warn] 极速/简易卡自动补全选项异常: {hs_e}")
+
+                                if not healed_simp_choices:
+                                    healed_simp_choices = (
+                                        "你打算怎么做？\n"
+                                        "1. 保持冷静观察对手破绽与周围地形，伺机而动\n"
+                                        "2. 果断出手抢占先机，正面化解眼前的危机 【🎲行动检定】\n"
+                                        "3. 借助现场环境掩体或随身器物制造混乱脱身\n"
+                                        "4. 【自定义行动】___"
+                                    )
+                                combined_story = (
+                                    f"{base_story_with_mem}\n\n{healed_mem_block}"
+                                    if healed_mem_block
+                                    else base_story_with_mem
+                                )
+                                full_reply = assemble_ai_message_modules(
+                                    simp_parts.get("think", "") if think_mod_enabled else "",
+                                    combined_story,
+                                    "",
+                                    healed_simp_choices,
+                                )
+                                ACTIVE_PARTIAL_TEXT[req.chat_id] = full_reply
+                                await event_queue.put({"replace": full_reply})
                 except Exception as norm_e:
                     print(f"[Warn] 模块归一化或自愈异常: {norm_e}")
 
                 # 检测 CG 图鉴触发与自动解锁（仅扫描去除思维链后的正文，避免思考过程误触发 CG）
                 visible_reply_for_cg = strip_thinking_blocks(full_reply)
-                triggered_cgs, cg_updated = evaluate_cg_book(project_data, f"{user_display_text}\n{visible_reply_for_cg}")
+                triggered_cgs, cg_updated = evaluate_cg_book(
+                    project_data,
+                    f"{user_display_text}\n{visible_reply_for_cg}",
+                    ai_only_text=visible_reply_for_cg,
+                )
                 all_unlocked_ids = [c.get("id") for c in (project_data.get("cg_book") or []) if isinstance(c, dict) and c.get("unlocked") and c.get("id")]
                 if cg_updated and proj_file.exists():
                     # 生成期间用户可能编辑过项目：重新读取最新项目文件，仅把本次触发的 CG 标记为已解锁后原子写回
@@ -4857,9 +5279,14 @@ def _deduplicate_choices_block(choices_text: str) -> str:
     if not raw:
         return ""
     if "<details" in raw.lower():
-        m_det = re.search(r"<details[\s\S]*?</details>", raw, flags=re.I)
+        m_det = re.search(
+            r"<details[^>]*>\s*<summary[^>]*>[^<]*(?:行动|选项|推荐|抉择|分支|下场|选择|choice|action|option)[\s\S]*?</details>",
+            raw,
+            flags=re.I,
+        )
         if m_det:
             return m_det.group(0).strip()
+        return raw
 
     ask_hdr_re = re.compile(
         r"^\s*(?:#{1,6}\s*|\*\*|\*)?\s*(?:[\[【]\s*(?:#\d+\s*)?)?(?:[🎯🎬💡⚡🧭]\s*)?"
@@ -5211,23 +5638,31 @@ def split_ai_message_modules(raw_text: str, active_status_keys: Optional[List[st
     if not status_inners:
         w_lines = working.splitlines()
         bare_hdr_re = re.compile(
-            r"^\s*(?:[-*•]\s*)?(?:#{1,6}\s*|\*\*|\*)?\s*(?:(?:#?\d+|[①-⑩])[\.、\s]*)?[\[【]\s*(?:(?:#?\d+|[①-⑩])[\.、\s]*)?([^\]】\n]+?)\s*[\]】]\s*[:：]?\s*(?:\*\*|\*)?\s*[:：]?\s*(.*)$"
+            r"^\s*(?:#{1,6}\s*|\*\*)?\s*(?:(?:#?\d+|[①-⑩])[\.、\s]*)?[\[【]\s*(?:(?:#?\d+|[①-⑩])[\.、\s]*)?([^\]】\n]+?)\s*[\]】]\s*[:：]?\s*(?:\*\*)?\s*[:：]?\s*(.*)$"
         )
         custom_key_set = {str(k).strip().lower() for k in (active_status_keys or []) if str(k).strip()}
         stat_title_re = re.compile(
-            r"^(?:主角状态|角色状态|个人状态|自身状态|当前状态|状态栏|状态面板|属性栏|装备栏|装备|穿戴装备|身体装备|义体|身体栏|身体状态|物品栏|物品|随身物品|背包|背包栏|行囊|道具栏|角色关系|好感|好感度|好感栏|人物关系|人际关系|在场人物|周围人物|情报卡|情报栏|世界新闻|任务目标|当前任务|剧情进度|NPC|NPC关系|NPC信息|系统面板)$",
+            r"^(?:主角状态|角色状态|个人状态|自身状态|当前状态|状态栏|状态面板|属性栏|装备栏|穿戴装备|身体装备|义体|身体栏|身体状态|物品栏|随身物品|背包|背包栏|行囊|道具栏|角色关系|好感度|好感栏|人物关系|人际关系|在场人物|周围人物|情报卡|情报栏|世界新闻|任务目标|当前任务|剧情进度|NPC关系)$",
             re.I,
         )
         choice_hdr_re = re.compile(r"^(?:行动选项|可选行动|行动推荐|行动选择|你的选择|你的抉择|选项)(?:栏|模块)?$", re.I)
         opt_num_re = re.compile(r"^\s*(?:\*\*|\*)?(?:[1-9]|[①-⑨]|[A-G])[\.、．\)]\s*\S", re.I)
         st_start = -1
+        det_depth = 0
         for idx_l, ln in enumerate(w_lines):
-            m_b = bare_hdr_re.match(ln)
-            if m_b:
-                t_clean = re.sub(r"^[📊⚔️🎒💕📋🏷️🧩📖🧠🎯📝💭⚡#\d①-⑩\.、\s*]+|\*+$", "", m_b.group(1)).strip()
-                if stat_title_re.match(t_clean) or (t_clean.lower() in custom_key_set):
-                    st_start = idx_l
-                    break
+            det_opens = len(re.findall(r"<details\b", ln, flags=re.I))
+            det_closes = len(re.findall(r"</details\s*>", ln, flags=re.I))
+            if det_opens:
+                det_depth += det_opens
+            if det_depth == 0 and not re.match(r"^\s*(?:[-*•>])", ln):
+                m_b = bare_hdr_re.match(ln)
+                if m_b:
+                    t_clean = re.sub(r"^[📊⚔️🎒💕📋🏷️🧩📖🧠🎯📝💭⚡#\d①-⑩\.、\s*]+|\*+$", "", m_b.group(1)).strip()
+                    if stat_title_re.match(t_clean) or (t_clean.lower() in custom_key_set):
+                        st_start = idx_l
+                        break
+            if det_closes:
+                det_depth = max(0, det_depth - det_closes)
         if st_start != -1:
             st_end = len(w_lines)
             for idx_l in range(st_start + 1, len(w_lines)):
@@ -5291,15 +5726,15 @@ def split_ai_message_modules(raw_text: str, active_status_keys: Optional[List[st
         flags=re.I
     ).strip()
 
-    # 3. 从剩余内容（正文 + 选项）中精准剥离末尾的【选项模块】，并彻底去重
+    # 3. 从剩余内容（正文 + 选项）中精准剥离末尾的【选项模块】，并彻底去重（兼容外层包裹 <details> 的闭合标签）
     choice_pattern = re.compile(
         r"(?:(?:\n|^)\s*(?:---|\*\*\*|___)\s*)?"
         r"(?:"
-        r"(?:\n|^)\s*<details[^>]*>\s*<summary[^>]*>[^<]*(?:行动|选项|推荐|抉择|分支|选择|choice|action|option)[\s\S]*?</details>\s*$"
+        r"(?:\n|^)\s*(<details[^>]*>\s*<summary[^>]*>[^<]*(?:行动|选项|推荐|抉择|分支|下场|选择|choice|action|option)(?![^<]*(?:SYSTEM\s*TERMINAL|系统面板|主角信息|NPC信息|记忆))[\s\S]*?</details>)((?:\s*</details>)*)\s*$"
         r"|"
-        r"(?:\n|^)\s*(?:#{1,6}\s*|\*\*|\*)?\s*(?:[\[【]\s*(?:#\d+\s*)?)?(?:[🎯🎬💡⚡🧭]\s*)?(?:你打算怎么做|接下来你[^\n]{0,18}|你的选择|你的抉择|行动选项|行动推荐|可选行动|可采取的?行动|你决定怎么做|你要怎么做|现在你[^\n]{0,12}怎么做)[^\n]*\n[\s\S]*$"
+        r"(?:\n|^)\s*((?:#{1,6}\s*|\*\*|\*)?\s*(?:[\[【]\s*(?:#\d+\s*)?)?(?:[🎯🎬💡⚡🧭]\s*)?(?:你打算怎么做|接下来你[^\n]{0,18}|你的选择|你的抉择|行动选项|行动推荐|可选行动|可采取的?行动|你决定怎么做|你要怎么做|现在你[^\n]{0,12}怎么做)[^\n]*\n(?:\s*(?:\*\*|\*)?(?:[1-9]|[①-⑨]|[A-G])[\.、．\)\s][^\n]+(?:\n|$))+?)((?:\s*</details>)*)\s*$"
         r"|"
-        r"(?:\n|^)(?:\s*(?:(?:\*\*|\*)?(?:[1-4]|①|②|③|④|[A-D])[\.、．\)\s]|[-*•]\s*(?:\*\*)?[【\[])[^\n]+(?:\n|$)){2,}[\s\S]*$"
+        r"(?:\n|^)((?:\s*(?:\*\*|\*)?(?:[1-7]|①|②|③|④|⑤|⑥|⑦|[A-D])[\.、．\)]\s*[^\n]+(?:\n|$)){2,})((?:\s*</details>)*)\s*$"
         r")",
         re.I
     )
@@ -5309,10 +5744,12 @@ def split_ai_message_modules(raw_text: str, active_status_keys: Optional[List[st
         m_choice = choice_pattern.search(story_body)
         if not m_choice:
             break
-        chunk = re.sub(r"^(?:---|\*\*\*|___)\s*\n*", "", m_choice.group(0).strip()).strip()
+        inner_chunk = (m_choice.group(1) or m_choice.group(3) or m_choice.group(5) or "").strip()
+        outer_closes = (m_choice.group(2) or m_choice.group(4) or m_choice.group(6) or "")
+        chunk = re.sub(r"^(?:---|\*\*\*|___)\s*\n*", "", inner_chunk).strip()
         if chunk:
             collected_choice_chunks.insert(0, chunk)
-        story_body = story_body[:m_choice.start()].strip()
+        story_body = (story_body[:m_choice.start()].rstrip() + outer_closes).strip()
 
     choices_body = _deduplicate_choices_block("\n".join(collected_choice_chunks))
 
@@ -5457,6 +5894,12 @@ async def reroll_choices(payload: Dict[str, Any], username: str = Depends(get_cu
             req_json["chat_template_kwargs"] = {"enable_thinking": False}
             req_json["repetition_penalty"] = 1.08
             req_json["penalty_last_n"] = 512
+        elif ep["engine"] == "llama":
+            req_json["reasoning_budget"] = 0
+            req_json["chat_template_kwargs"] = {"enable_thinking": False}
+            req_json["repeat_penalty"] = 1.08
+            req_json["repeat_last_n"] = 512
+            req_json["cache_prompt"] = True
         elif ep["engine"] == "ollama":
             req_json["think"] = False
             req_json["reasoning_effort"] = "none"
@@ -6599,6 +7042,768 @@ def _extract_chara_json_from_png_bytes(png_bytes: bytes) -> Dict[str, Any]:
         return found_json
     raise ValueError("PNG 中无角色卡数据")
 
+
+
+# ==================== 游戏卡（Game Card）双向互通：本工作台 <-> SillyTavern 酒馆 (PNG / JSON, V2 / V3) ====================
+def _load_cjk_font(size: int, bold: bool = False):
+    from PIL import ImageFont
+    candidates = (
+        [
+            r"C:\Windows\Fonts\msyhbd.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+            r"C:\Windows\Fonts\msyh.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        ]
+        if bold
+        else [
+            r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        ]
+    )
+    for fp in candidates:
+        try:
+            if Path(fp).exists():
+                return ImageFont.truetype(fp, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _resolve_project_image_bytes(img_ref: str, username: str) -> Optional[bytes]:
+    s = str(img_ref or "").strip()
+    if not s:
+        return None
+    if s.startswith("data:image/"):
+        m = re.match(r"^data:image/[^;]+;base64,(.+)$", s, flags=re.S)
+        if m:
+            try:
+                return base64.b64decode(re.sub(r"\s+", "", m.group(1)))
+            except Exception:
+                return None
+    m_gal = re.search(r"/api/gallery/(?:image|thumb)/([a-zA-Z0-9._-]+)", s)
+    if m_gal:
+        gid = sanitize_id(m_gal.group(1))
+        gdir = get_user_gallery_dir(username)
+        for cand in gdir.glob(f"{gid}*"):
+            if cand.is_file() and cand.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                try:
+                    return cand.read_bytes()
+                except Exception:
+                    pass
+    return None
+
+
+def _inject_png_text_chunks(png_bytes: bytes, chunks_kv: List[Tuple[str, str]]) -> bytes:
+    """在 PNG IEND 块前写入标准 tEXt 数据块（同时写入 chara 与 ccv3，100% 兼容 SillyTavern V2/V3 与本工作台）"""
+    import struct
+    import zlib
+
+    if len(png_bytes) < 12 or png_bytes[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("无效的 PNG 字节流")
+
+    out = bytearray(png_bytes[:8])
+    pos = 8
+    injected = False
+    extra_chunks = bytearray()
+    for keyword, text_val in chunks_kv:
+        kw_bytes = keyword.encode("latin-1", errors="ignore")[:79]
+        b64_payload = base64.b64encode(text_val.encode("utf-8"))
+        c_data = kw_bytes + b"\x00" + b64_payload
+        c_type = b"tEXt"
+        crc = zlib.crc32(c_type + c_data) & 0xFFFFFFFF
+        extra_chunks.extend(struct.pack(">I", len(c_data)))
+        extra_chunks.extend(c_type)
+        extra_chunks.extend(c_data)
+        extra_chunks.extend(struct.pack(">I", crc))
+
+    while pos + 12 <= len(png_bytes):
+        length = struct.unpack(">I", png_bytes[pos:pos + 4])[0]
+        if pos + 12 + length > len(png_bytes):
+            break
+        chunk_type = png_bytes[pos + 4:pos + 8]
+        chunk_full = png_bytes[pos:pos + 12 + length]
+        pos += 12 + length
+        if chunk_type in (b"tEXt", b"zTXt", b"iTXt"):
+            nul_pos = chunk_full[8:-4].find(b"\x00")
+            if nul_pos != -1:
+                kw = chunk_full[8:8 + nul_pos].decode("latin-1", errors="ignore").strip().lower()
+                if kw in ("chara", "ccv3"):
+                    continue
+        if chunk_type == b"IEND" and not injected:
+            out.extend(extra_chunks)
+            injected = True
+        out.extend(chunk_full)
+        if chunk_type == b"IEND":
+            break
+
+    if not injected:
+        out.extend(extra_chunks)
+    return bytes(out)
+
+
+def _render_game_card_poster_png(proj: Dict[str, Any], username: str) -> bytes:
+    from PIL import Image, ImageDraw
+
+    W, H = 600, 840
+    cover_bytes = (
+        _resolve_project_image_bytes(proj.get("icon") or proj.get("avatar") or "", username)
+        or _resolve_project_image_bytes((proj.get("appearance") or {}).get("bg_mobile") or "", username)
+        or _resolve_project_image_bytes((proj.get("appearance") or {}).get("bg_image") or "", username)
+    )
+
+    canvas = Image.new("RGBA", (W, H), (20, 18, 16, 255))
+    has_art = False
+    if cover_bytes:
+        try:
+            src_im = Image.open(io.BytesIO(cover_bytes)).convert("RGBA")
+            sw, sh = src_im.size
+            if sw > 0 and sh > 0:
+                scale = max(W / sw, H / sh)
+                nw, nh = max(1, int(sw * scale)), max(1, int(sh * scale))
+                resized = src_im.resize((nw, nh), Image.Resampling.LANCZOS)
+                left = max(0, (nw - W) // 2)
+                top = max(0, (nh - H) // 2)
+                canvas = resized.crop((left, top, left + W, top + H))
+                has_art = True
+        except Exception:
+            has_art = False
+
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+
+    if has_art:
+        for y in range(H // 2, H):
+            ratio = (y - H // 2) / max(1, (H - H // 2))
+            alpha = int(235 * (ratio ** 1.35))
+            odraw.line([(0, y), (W, y)], fill=(14, 12, 11, min(242, alpha)))
+    else:
+        for y in range(H):
+            r = int(28 - 10 * (y / H))
+            g = int(24 - 8 * (y / H))
+            b = int(21 - 7 * (y / H))
+            odraw.line([(0, y), (W, y)], fill=(r, g, b, 255))
+        odraw.rounded_rectangle([22, 22, W - 22, H - 22], radius=20, outline=(212, 166, 90, 130), width=2)
+        odraw.rounded_rectangle([32, 32, W - 32, H - 32], radius=14, outline=(212, 166, 90, 48), width=1)
+
+    canvas = Image.alpha_composite(canvas, overlay)
+    draw = ImageDraw.Draw(canvas)
+
+    f_badge = _load_cjk_font(17, bold=True)
+    f_title = _load_cjk_font(36, bold=True)
+    f_desc = _load_cjk_font(19, bold=False)
+    f_tag = _load_cjk_font(16, bold=False)
+
+    mode_txt = "EASY-TRPG · 简易游戏卡" if (proj.get("card_tier") == "simple" or proj.get("simple_mode")) else "EASY-TRPG · 高级游戏卡"
+    title_txt = str(proj.get("name") or "未命名游戏卡").strip()[:28]
+    desc_txt = str(proj.get("description") or "").strip()
+    if not desc_txt:
+        gm = proj.get("guided_meta") if isinstance(proj.get("guided_meta"), dict) else {}
+        desc_txt = str(gm.get("main_plot") or gm.get("world_conflict") or proj.get("system_prompt") or "支持一键导入 Easy-TRPG 工作台与 SillyTavern 酒馆").strip()
+    desc_txt = re.sub(r"\s+", " ", desc_txt)[:96]
+    tags_list = [str(t).strip() for t in (proj.get("tags") or []) if str(t).strip()][:5]
+
+    def _wrap_lines(txt: str, font_obj, max_px: int, max_lines: int) -> List[str]:
+        lines_out: List[str] = []
+        cur = ""
+        for ch in txt:
+            cand = cur + ch
+            try:
+                w = draw.textlength(cand, font=font_obj)
+            except Exception:
+                w = len(cand) * 20
+            if w > max_px and cur:
+                lines_out.append(cur)
+                cur = ch
+                if len(lines_out) >= max_lines:
+                    lines_out[-1] = lines_out[-1][:-1] + "…"
+                    return lines_out
+            else:
+                cur = cand
+        if cur and len(lines_out) < max_lines:
+            lines_out.append(cur)
+        return lines_out
+
+    base_y = H - 245 if has_art else 220
+    draw.rounded_rectangle([44, base_y, 260, base_y + 30], radius=8, fill=(212, 166, 90, 42), outline=(212, 166, 90, 150), width=1)
+    draw.text((56, base_y + 5), mode_txt, font=f_badge, fill=(242, 205, 138, 255))
+
+    ty = base_y + 46
+    for t_ln in _wrap_lines(title_txt, f_title, W - 92, 2):
+        draw.text((46, ty), t_ln, font=f_title, fill=(248, 244, 236, 255))
+        ty += 46
+
+    ty += 8
+    for d_ln in _wrap_lines(desc_txt, f_desc, W - 96, 3 if has_art else 6):
+        draw.text((46, ty), d_ln, font=f_desc, fill=(208, 198, 184, 230))
+        ty += 28
+
+    if tags_list:
+        tx = 46
+        tag_y = H - 58
+        for tg in tags_list:
+            lbl = f"#{tg[:10]}"
+            try:
+                tw = int(draw.textlength(lbl, font=f_tag)) + 20
+            except Exception:
+                tw = len(lbl) * 16 + 20
+            if tx + tw > W - 44:
+                break
+            draw.rounded_rectangle([tx, tag_y, tx + tw, tag_y + 28], radius=14, fill=(255, 255, 255, 22), outline=(212, 166, 90, 85), width=1)
+            draw.text((tx + 10, tag_y + 5), lbl, font=f_tag, fill=(235, 214, 175, 240))
+            tx += tw + 8
+
+    out_buf = io.BytesIO()
+    canvas.convert("RGB").save(out_buf, format="PNG", optimize=True)
+    return out_buf.getvalue()
+
+
+def _inline_gallery_ref_to_data_url(ref_val: Any, username: str, max_dim: int = 1024, max_bytes: int = 160_000) -> str:
+    s = str(ref_val or "").strip()
+    if not s or s.startswith("data:image/"):
+        return s
+    raw_b = _resolve_project_image_bytes(s, username)
+    if not raw_b:
+        return s
+    try:
+        raw_durl = "data:image/png;base64," + base64.b64encode(raw_b).decode("ascii")
+        return optimize_image_base64(raw_durl, max_dim, 82, max_bytes)
+    except Exception:
+        return s
+
+
+def _build_tavern_v3_game_card_dict(proj: Dict[str, Any], username: str = "player") -> Dict[str, Any]:
+    """将本工作台游戏企划打包为标准 SillyTavern V2/V3 兼容结构 + 无损 easy_trpg_game_card 扩展"""
+    name = str(proj.get("name") or "未命名游戏卡").strip()
+    player_intro = str(proj.get("description") or "").strip()
+    sys_prompt = str(proj.get("system_prompt") or "").strip()
+    status_spec = ""
+    if proj.get("status_panel_enabled", False) and not proj.get("simple_mode", False):
+        status_spec = build_status_module_prompt(proj).strip()
+    combined_desc = f"{sys_prompt}\n\n{status_spec}".strip() if (sys_prompt and status_spec) else (sys_prompt or status_spec)
+
+    gm = proj.get("guided_meta") if isinstance(proj.get("guided_meta"), dict) else {}
+    scenario_txt = str(gm.get("world_conflict") or gm.get("main_plot") or "").strip()
+
+    og_list = proj.get("opening_greetings") if isinstance(proj.get("opening_greetings"), list) else []
+    greetings: List[str] = []
+    for og in og_list:
+        if isinstance(og, str) and og.strip():
+            greetings.append(og.strip())
+        elif isinstance(og, dict):
+            c = str(og.get("content") or og.get("text") or "").strip()
+            if c:
+                greetings.append(c)
+    if not greetings and str(proj.get("opening_statement") or "").strip():
+        greetings.append(str(proj.get("opening_statement")).strip())
+
+    first_mes = greetings[0] if greetings else ""
+    alt_greetings = greetings[1:] if len(greetings) > 1 else []
+
+    wb_entries = []
+    for idx, wb in enumerate(proj.get("world_book") or []):
+        if not isinstance(wb, dict):
+            continue
+        raw_k = wb.get("keys") or []
+        keys_arr = [str(k).strip() for k in raw_k if str(k).strip()] if isinstance(raw_k, list) else [k.strip() for k in str(raw_k).split(",") if k.strip()]
+        m_type = str(wb.get("match_type") or "OR").upper()
+        is_const = (m_type == "CONSTANT") or bool(wb.get("constant", False)) or (len(keys_arr) == 0 and bool(wb.get("content", "").strip()))
+        wb_entries.append({
+            "id": idx,
+            "keys": keys_arr,
+            "secondary_keys": [],
+            "comment": str(wb.get("name") or f"词条 #{idx + 1}"),
+            "content": str(wb.get("content") or ""),
+            "constant": is_const,
+            "selective": m_type == "AND",
+            "insertion_order": 100 + idx,
+            "enabled": wb.get("enabled", True) is not False,
+            "position": "after_char" if str(wb.get("value_region") or "System").lower() == "after" else "before_char",
+        })
+
+    st_regex_scripts = []
+    for r_idx, rx in enumerate(proj.get("regex_scripts") or proj.get("regex_replaces") or []):
+        if not isinstance(rx, dict):
+            continue
+        pat = str(rx.get("find_regex") or rx.get("pattern") or rx.get("findRegex") or "").strip()
+        if not pat:
+            continue
+        st_regex_scripts.append({
+            "id": str(rx.get("id") or f"rx_{r_idx + 1}"),
+            "scriptName": str(rx.get("name") or rx.get("scriptName") or f"规则 #{r_idx + 1}"),
+            "findRegex": pat,
+            "replaceString": str(rx.get("replace_str") or rx.get("replacement") or rx.get("replaceString") or ""),
+            "placement": [2] if int(rx.get("target_scope", 1) or 1) == 1 else [1, 2],
+            "disabled": rx.get("enabled", True) is False,
+            "markdownOnly": bool(rx.get("is_only_render", False)),
+            "promptOnly": False,
+            "runOnEdit": True,
+        })
+
+    portable_proj = copy.deepcopy(proj)
+    portable_proj.pop("id", None)
+    if portable_proj.get("icon"):
+        portable_proj["icon"] = _inline_gallery_ref_to_data_url(portable_proj["icon"], username, 384, 75_000)
+        portable_proj["avatar"] = portable_proj["icon"]
+    if isinstance(portable_proj.get("appearance"), dict):
+        if portable_proj["appearance"].get("bg_image"):
+            portable_proj["appearance"]["bg_image"] = _inline_gallery_ref_to_data_url(portable_proj["appearance"]["bg_image"], username, 1280, 180_000)
+            portable_proj["bg_image"] = portable_proj["appearance"]["bg_image"]
+        if portable_proj["appearance"].get("bg_mobile"):
+            portable_proj["appearance"]["bg_mobile"] = _inline_gallery_ref_to_data_url(portable_proj["appearance"]["bg_mobile"], username, 1080, 160_000)
+    if isinstance(portable_proj.get("cg_book"), list):
+        for cg_it in portable_proj["cg_book"]:
+            if isinstance(cg_it, dict) and cg_it.get("image_url"):
+                cg_it["image_url"] = _inline_gallery_ref_to_data_url(cg_it["image_url"], username, 1024, 150_000)
+
+    data_block: Dict[str, Any] = {
+        "name": name,
+        "description": combined_desc,
+        "personality": "",
+        "scenario": scenario_txt,
+        "first_mes": first_mes,
+        "mes_example": "",
+        "creator_notes": player_intro,
+        "system_prompt": str(proj.get("prefix") or ""),
+        "post_history_instructions": str(proj.get("suffix") or ""),
+        "alternate_greetings": alt_greetings,
+        "tags": list(proj.get("tags") or []),
+        "creator": str(proj.get("author") or "Easy-TRPG Creator"),
+        "character_version": APP_VERSION,
+        "extensions": {
+            "easy_trpg_game_card": portable_proj,
+            **({"custom_css": str(proj.get("custom_css") or "")} if str(proj.get("custom_css") or "").strip() else {}),
+            **({"detailed_description": str(proj.get("detailed_description") or "")} if str(proj.get("detailed_description") or "").strip() else {}),
+            **({"quick_replies": list(proj.get("quick_replies") or [])} if proj.get("quick_replies") else {}),
+            **({"regex_scripts": st_regex_scripts} if st_regex_scripts else {}),
+        },
+    }
+    if wb_entries:
+        data_block["character_book"] = {
+            "name": f"{name} 世界书",
+            "entries": wb_entries,
+        }
+
+    return {
+        "spec": "chara_card_v3",
+        "spec_version": "3.0",
+        "name": name,
+        "description": combined_desc,
+        "personality": "",
+        "scenario": scenario_txt,
+        "first_mes": first_mes,
+        "mes_example": "",
+        "creatorcomment": player_intro,
+        "tags": list(proj.get("tags") or []),
+        "data": data_block,
+    }
+
+
+def _convert_imported_card_to_project(
+    raw_json: Dict[str, Any],
+    cover_b64: str,
+    settings: Dict[str, Any],
+) -> Dict[str, Any]:
+    """将导入的 Easy-TRPG 游戏卡或 SillyTavern V1/V2/V3 角色卡/世界卡无损转换为本工作台游戏企划"""
+    if not isinstance(raw_json, dict):
+        raise ValueError("JSON 结构不是有效对象")
+
+    data_part = raw_json.get("data") if isinstance(raw_json.get("data"), dict) else {}
+    ext_part = data_part.get("extensions") if isinstance(data_part.get("extensions"), dict) else (
+        raw_json.get("extensions") if isinstance(raw_json.get("extensions"), dict) else {}
+    )
+
+    native_snap = ext_part.get("easy_trpg_game_card") or raw_json.get("easy_trpg_game_card")
+    if not native_snap and ("ui_modules" in raw_json or "completion_params" in raw_json or "guided_meta" in raw_json):
+        native_snap = raw_json
+
+    if isinstance(native_snap, dict):
+        restored = copy.deepcopy(native_snap)
+        restored.pop("id", None)
+        cur_ic = str(restored.get("icon") or "").strip()
+        if cover_b64 and (not cur_ic or not (cur_ic.startswith("data:image/") or cur_ic.startswith("/") or cur_ic.startswith("http"))):
+            restored["icon"] = cover_b64
+            restored["avatar"] = cover_b64
+        return normalize_project_schema(restored, {}, global_defaults=settings)
+
+    # 标准 SillyTavern / OpenTavern V1 / V2 / V3 卡片转换
+    def _pick(*keys: str) -> str:
+        for k in keys:
+            v = data_part.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+            v2 = raw_json.get(k)
+            if isinstance(v2, str) and v2.strip():
+                return v2.strip()
+        return ""
+
+    name = _pick("name") or "导入酒馆游戏卡"
+    creator_notes = _pick("creator_notes", "creatorcomment")
+    st_desc = _pick("description")
+    st_pers = _pick("personality")
+    st_scen = _pick("scenario")
+    st_mes_ex = _pick("mes_example")
+    st_sys = _pick("system_prompt")
+    st_post = _pick("post_history_instructions", "depth_prompt_prompt")
+
+    sys_sections: List[str] = []
+    if st_desc:
+        sys_sections.append(st_desc)
+    if st_pers:
+        sys_sections.append(f"## 角色性格与特征\n{st_pers}")
+    if st_scen:
+        sys_sections.append(f"## 背景与初始处境\n{st_scen}")
+    if st_mes_ex and st_mes_ex != "<START>":
+        sys_sections.append(f"## 叙事与对话示例\n{st_mes_ex}")
+    assembled_sys = "\n\n".join(sys_sections).strip()
+
+    first_mes = _pick("first_mes")
+    alt_raw = data_part.get("alternate_greetings") if isinstance(data_part.get("alternate_greetings"), list) else (
+        raw_json.get("alternate_greetings") if isinstance(raw_json.get("alternate_greetings"), list) else []
+    )
+    opening_greetings = []
+    if first_mes:
+        opening_greetings.append({"id": "og_1", "title": "默认开场", "content": first_mes})
+    for idx_a, ag in enumerate(alt_raw):
+        ag_s = str(ag or "").strip()
+        if ag_s:
+            opening_greetings.append({"id": f"og_{len(opening_greetings) + 1}", "title": f"分支开场 #{idx_a + 2}", "content": ag_s})
+
+    raw_cb = data_part.get("character_book") or raw_json.get("character_book") or ext_part.get("character_book")
+    wb_list = _normalize_character_book_entries(raw_cb, name) if raw_cb else []
+
+    raw_rx = ext_part.get("regex_scripts") if isinstance(ext_part.get("regex_scripts"), list) else []
+    regex_list = []
+    for r_i, rx in enumerate(raw_rx):
+        if not isinstance(rx, dict):
+            continue
+        f_pat = str(rx.get("findRegex") or rx.get("pattern") or "").strip()
+        if not f_pat:
+            continue
+        regex_list.append({
+            "id": str(rx.get("id") or f"rx_{r_i + 1}"),
+            "name": str(rx.get("scriptName") or rx.get("name") or f"酒馆正则 #{r_i + 1}"),
+            "find_regex": f_pat,
+            "pattern": f_pat,
+            "replace_str": str(rx.get("replaceString") or rx.get("replacement") or ""),
+            "replacement": str(rx.get("replaceString") or rx.get("replacement") or ""),
+            "enabled": not bool(rx.get("disabled", False)),
+            "is_only_render": bool(rx.get("markdownOnly", True)),
+            "target_scope": 1,
+        })
+
+    raw_tags = data_part.get("tags") if isinstance(data_part.get("tags"), list) else (
+        raw_json.get("tags") if isinstance(raw_json.get("tags"), list) else []
+    )
+    tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+
+    imported_css = str(ext_part.get("custom_css") or raw_json.get("custom_css") or "").strip()
+    if not imported_css and creator_notes and "<style" in creator_notes.lower():
+        m_styles = re.findall(r"<style[^>]*>([\s\S]*?)</style>", creator_notes, flags=re.IGNORECASE)
+        if m_styles:
+            imported_css = "\n\n".join(s.strip() for s in m_styles if s.strip())
+            creator_notes = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", creator_notes, flags=re.IGNORECASE).strip()
+    imported_detailed_desc = str(ext_part.get("detailed_description") or raw_json.get("detailed_description") or "").strip()
+    imported_qr = ext_part.get("quick_replies") if isinstance(ext_part.get("quick_replies"), list) else []
+
+    proj_payload = {
+        "name": name,
+        "icon": cover_b64 or "",
+        "avatar": cover_b64 or "",
+        "description": creator_notes,
+        "detailed_description": imported_detailed_desc,
+        "custom_css": imported_css,
+        "quick_replies": imported_qr,
+        "tags": tags,
+        "card_tier": "advanced",
+        "simple_mode": False,
+        "cot_enabled": True,
+        "status_panel_enabled": False,
+        "ui_modules": [],
+        "prefix": st_sys,
+        "system_prompt": assembled_sys,
+        "suffix": st_post,
+        "opening_greetings": opening_greetings,
+        "opening_statement": first_mes,
+        "world_book": wb_list,
+        "regex_scripts": regex_list,
+        "regex_replaces": regex_list,
+        "appearance": {"bg_image": "", "custom_css": imported_css},
+    }
+    return normalize_project_schema(proj_payload, {}, global_defaults=settings)
+
+
+@app.get("/api/projects/{project_id}/export_card")
+async def export_project_game_card(
+    project_id: str,
+    format: str = "png",
+    username: str = Depends(get_current_user),
+):
+    ensure_user_workspace(username)
+    project_id = sanitize_id(project_id)
+    settings = load_user_settings(username)
+    file_path = get_user_projects_dir(username) / f"{project_id}.json"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="游戏卡不存在")
+    with open(file_path, "r", encoding="utf-8") as f:
+        proj = normalize_project_schema(json.load(f), global_defaults=settings)
+
+    card_dict = _build_tavern_v3_game_card_dict(proj, username)
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "_", str(proj.get("name") or "游戏卡")).strip() or "game_card"
+    fmt = (format or "png").strip().lower()
+    if fmt == "json":
+        json_bytes = json.dumps(card_dict, ensure_ascii=False, indent=2).encode("utf-8")
+        disp = f"attachment; filename*=UTF-8''{quote(safe_name + '_游戏卡.json')}"
+        return Response(content=json_bytes, media_type="application/json; charset=utf-8", headers={"Content-Disposition": disp})
+
+    poster_png = await asyncio.to_thread(_render_game_card_poster_png, proj, username)
+    compact_json = json.dumps(card_dict, ensure_ascii=False, separators=(",", ":"))
+    card_png = _inject_png_text_chunks(poster_png, [("chara", compact_json), ("ccv3", compact_json)])
+    disp = f"attachment; filename*=UTF-8''{quote(safe_name + '_游戏卡.png')}"
+    return Response(content=card_png, media_type="image/png", headers={"Content-Disposition": disp})
+
+
+@app.post("/api/projects/export_draft_card")
+async def export_draft_game_card(payload: Dict[str, Any], username: str = Depends(get_current_user)):
+    settings = load_user_settings(username)
+    raw_proj = payload.get("project") if isinstance(payload.get("project"), dict) else payload
+    proj = normalize_project_schema(raw_proj, {}, global_defaults=settings)
+    card_dict = _build_tavern_v3_game_card_dict(proj, username)
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "_", str(proj.get("name") or "游戏卡")).strip() or "game_card"
+    fmt = str(payload.get("format") or "png").strip().lower()
+    if fmt == "json":
+        json_bytes = json.dumps(card_dict, ensure_ascii=False, indent=2).encode("utf-8")
+        disp = f"attachment; filename*=UTF-8''{quote(safe_name + '_游戏卡.json')}"
+        return Response(content=json_bytes, media_type="application/json; charset=utf-8", headers={"Content-Disposition": disp})
+
+    poster_png = await asyncio.to_thread(_render_game_card_poster_png, proj, username)
+    compact_json = json.dumps(card_dict, ensure_ascii=False, separators=(",", ":"))
+    card_png = _inject_png_text_chunks(poster_png, [("chara", compact_json), ("ccv3", compact_json)])
+    disp = f"attachment; filename*=UTF-8''{quote(safe_name + '_游戏卡.png')}"
+    return Response(content=card_png, media_type="image/png", headers={"Content-Disposition": disp})
+
+
+@app.post("/api/projects/import_card")
+async def import_project_game_card(file: UploadFile = File(...), username: str = Depends(get_current_user)):
+    ensure_user_workspace(username)
+    raw_bytes = await file.read()
+    if len(raw_bytes) > 40 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="游戏卡文件体积不能超过 40MB")
+    fname = (file.filename or "").lower()
+    cover_b64 = ""
+    settings = load_user_settings(username)
+
+    try:
+        if fname.endswith(".png") or raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            raw_json = _extract_chara_json_from_png_bytes(raw_bytes)
+            raw_data_url = "data:image/png;base64," + base64.b64encode(raw_bytes).decode("ascii")
+            cover_b64 = await asyncio.to_thread(optimize_image_base64, raw_data_url, 480, 84, 95_000)
+        else:
+            raw_json = json.loads(raw_bytes.decode("utf-8-sig"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"解析游戏卡失败：{e}")
+
+    try:
+        proj = _convert_imported_card_to_project(raw_json, cover_b64, settings)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"转换游戏卡格式失败：{e}")
+
+    new_pid = f"proj_{uuid.uuid4().hex[:8]}"
+    proj["id"] = new_pid
+    now = time.time()
+    proj["created_at"] = now
+    proj["updated_at"] = now
+
+    proj_file = get_user_projects_dir(username) / f"{new_pid}.json"
+    atomic_write_json(proj_file, proj, ensure_ascii=False, indent=2)
+
+    chat_id = str(uuid.uuid4().hex[:8])
+    init_msgs = []
+    first_og = ""
+    if isinstance(proj.get("opening_greetings"), list) and proj["opening_greetings"]:
+        og0 = proj["opening_greetings"][0]
+        first_og = str(og0.get("content") if isinstance(og0, dict) else og0 or "").strip()
+    elif str(proj.get("opening_statement") or "").strip():
+        first_og = str(proj.get("opening_statement")).strip()
+
+    if first_og:
+        init_msgs.append({
+            "id": "msg_opening_" + uuid.uuid4().hex[:6],
+            "role": "assistant",
+            "content": first_og,
+            "is_opening": True,
+            "timestamp": now,
+        })
+
+    chat_data = {
+        "id": chat_id,
+        "title": f"{proj.get('name', '新游戏')} · 存档 #1",
+        "project_id": new_pid,
+        "model": settings.get("model", ""),
+        "summary": "",
+        "summarized_count": 0,
+        "inputs": {},
+        "variables": {},
+        "created_at": now,
+        "updated_at": now,
+        "messages": init_msgs,
+    }
+    atomic_write_json(get_user_chats_dir(username) / f"{chat_id}.json", chat_data, ensure_ascii=False, indent=2)
+
+    with _USER_SETTINGS_LOCK:
+        cur_s = load_user_settings(username)
+        cur_s["active_project_id"] = new_pid
+        save_user_settings(username, cur_s)
+
+    return {"status": "ok", "project": proj, "chat_id": chat_id}
+
+
+@app.post("/api/ai/generate_game_card")
+async def ai_generate_guided_game_card(payload: Dict[str, Any], username: str = Depends(get_current_user)):
+    """简易创作：根据一句话脑洞/大纲自动生成全套结构化游戏卡设定（保留用户已填内容不覆盖）"""
+    settings = load_user_settings(username)
+    idea = str(payload.get("idea") or "").strip()
+    cur_name = str(payload.get("name") or "").strip()
+    cur_desc = str(payload.get("description") or "").strip()
+    cur_meta = payload.get("current_meta") if isinstance(payload.get("current_meta"), dict) else {}
+    req_model = str(payload.get("model") or settings.get("model") or "").strip()
+
+    if not idea and not cur_name and not cur_desc:
+        raise HTTPException(status_code=400, detail="请先输入一句话创作想法或题材描述")
+
+    ep = resolve_model_endpoint(req_model, settings)
+    if ep["is_local"]:
+        local_err = await ensure_local_engine_ready(req_model)
+        ep = resolve_model_endpoint(req_model, settings)
+        if local_err:
+            raise HTTPException(status_code=503, detail=local_err)
+    if not ep.get("base_url") or is_self_workbench_url(ep["base_url"]):
+        raise HTTPException(status_code=400, detail="尚未配置可用的 AI 模型，请先在左下角「模型」中选择本地模型或配置 API")
+
+    existing_summary_lines = []
+    if cur_name and not cur_name.startswith(("新企划", "新剧本", "新游戏")):
+        existing_summary_lines.append(f"- 已有名称：{cur_name}")
+    if cur_desc:
+        existing_summary_lines.append(f"- 已有简介：{cur_desc}")
+    for k, lbl in [
+        ("protagonist_name", "主人公名称"),
+        ("protagonist_desc", "主人公设定"),
+        ("protagonist_goal", "核心动机/目标"),
+        ("world_name", "世界名称"),
+        ("world_era", "时代与体系"),
+        ("world_conflict", "核心冲突"),
+        ("world_tone", "整体基调与文风"),
+        ("main_plot", "主线情节"),
+        ("initial_state", "初始剧情状态"),
+        ("play_rules", "游玩规则"),
+    ]:
+        val = str(cur_meta.get(k) or "").strip()
+        if val:
+            existing_summary_lines.append(f"- 已有{lbl}：{val}")
+
+    sys_msg = (
+        "你是一位顶级互动跑团企划设计师与世界观架构师。请根据用户的创作脑洞，构思一套结构严密、极具代入感与可玩性的跑团游戏卡设定。\n"
+        "请严格只输出一个合法的 JSON 对象（不要包裹 markdown 代码块解释文字），包含以下字段：\n"
+        "{\n"
+        '  "name": "富有吸引力的作品名称（4~12字）",\n'
+        '  "description": "面向玩家展示的作品简介（60~140字，吸引玩家游玩，不发给AI）",\n'
+        '  "tags": ["题材标签1", "标签2", "标签3"],\n'
+        '  "protagonist_name": "主人公称呼或身份定位",\n'
+        '  "protagonist_desc": "主人公背景、能力特长与随身特征（60~150字）",\n'
+        '  "protagonist_goal": "主人公的核心动机与初始目标（40~100字）",\n'
+        '  "world_name": "故事展开的世界/城市/舞台名称",\n'
+        '  "world_era": "时代背景与科技/魔法/力量体系（80~180字）",\n'
+        '  "world_conflict": "核心冲突、派系暗流与生存压力（80~180字）",\n'
+        '  "world_tone": "整体基调、叙事视角与文风要求（如：第二人称冷硬写实、悬疑紧张等）",\n'
+        '  "main_plot": "主线情节推进脉络与关键转折悬念（100~220字）",\n'
+        '  "initial_state": "第一幕初始剧情状态（第二人称『你』开场，描写玩家刚进入游戏时的具体场景、感官细节与眼前局势，120~260字）",\n'
+        '  "play_rules": "AI 主持必须遵守的游玩法则（如：真实因果判定、NPC独立动机、严禁代写玩家台词等，60~160字）",\n'
+        '  "npcs": [\n'
+        '    {"name": "角色名", "role": "身份/阵营", "desc": "外貌、性格与实力特征", "attitude": "对主角初始态度与隐藏动机"}\n'
+        "  ]\n"
+        "}"
+    )
+    user_msg = f"【创作脑洞 / 大致描述】：\n{idea or cur_desc or cur_name}"
+    if existing_summary_lines:
+        user_msg += "\n\n【用户已填写的设定（请围绕这些已有设定保持一致并补全其余项）】：\n" + "\n".join(existing_summary_lines)
+
+    req_json: Dict[str, Any] = {
+        "model": ep["upstream_model"],
+        "messages": [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        "max_tokens": 4096,
+        "temperature": 0.72,
+        "stream": True,
+    }
+    if ep["is_local"]:
+        if ep["engine"] == "strata":
+            req_json["reasoning_effort"] = "none"
+            req_json["reasoning_budget_tokens"] = 0
+            req_json["chat_template_kwargs"] = {"enable_thinking": False}
+        elif ep["engine"] == "llama":
+            req_json["reasoning_budget"] = 0
+            req_json["chat_template_kwargs"] = {"enable_thinking": False}
+        elif ep["engine"] == "ollama":
+            req_json["think"] = False
+            req_json["chat_template_kwargs"] = {"enable_thinking": False}
+
+    collected: List[str] = []
+    proxy_candidates = [ep["proxy"], None] if ep["proxy"] else [None]
+    req_headers = ep.get("headers") or {"Authorization": f"Bearer {ep['api_key']}", "Content-Type": "application/json"}
+
+    for cur_proxy in proxy_candidates:
+        try:
+            async with httpx.AsyncClient(proxy=cur_proxy, trust_env=False, timeout=httpx.Timeout(120.0, connect=12.0)) as client:
+                async with client.stream("POST", f"{ep['base_url']}/chat/completions", headers=req_headers, json=req_json) as resp:
+                    if resp.status_code != 200:
+                        continue
+                    ctype = (resp.headers.get("content-type") or "").lower()
+                    if "text/event-stream" not in ctype:
+                        rj = json.loads((await resp.aread()).decode("utf-8", errors="ignore"))
+                        c = ((rj.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                        if c:
+                            collected.append(c)
+                    else:
+                        async for line in resp.aiter_lines():
+                            line = line.strip()
+                            if line.startswith("data:"):
+                                raw_d = line[5:].lstrip()
+                                if raw_d == "[DONE]":
+                                    break
+                                try:
+                                    dj = json.loads(raw_d)
+                                    c = (((dj.get("choices") or [{}])[0].get("delta") or {}).get("content")) or ""
+                                    if c:
+                                        collected.append(c)
+                                except Exception:
+                                    pass
+                    if collected:
+                        break
+        except Exception:
+            continue
+
+    raw_reply = strip_thinking_blocks("".join(collected)).strip()
+    clean_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_reply, flags=re.I).strip()
+    parsed: Dict[str, Any] = {}
+    try:
+        parsed = json.loads(clean_json)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", clean_json)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+            except Exception:
+                pass
+    if not isinstance(parsed, dict) or not parsed:
+        raise HTTPException(status_code=500, detail="AI 返回格式解析失败，请重试或切换模型")
+
+    return {"status": "ok", "generated": parsed}
+
+
 @app.post("/api/character_cards/import")
 async def import_character_card_file(file: UploadFile = File(...), username: str = Depends(get_current_user)):
     raw_bytes = await file.read()
@@ -6858,6 +8063,11 @@ async def ai_generate_character_card(payload: Dict[str, Any], username: str = De
             card_req_json["reasoning_budget_tokens"] = 512
             card_req_json["repeat_penalty"] = 1.05
             card_req_json["repeat_last_n"] = 1024
+        elif ep["engine"] == "llama":
+            card_req_json["reasoning_budget"] = 0
+            card_req_json["chat_template_kwargs"] = {"enable_thinking": False}
+            card_req_json["repeat_penalty"] = 1.05
+            card_req_json["repeat_last_n"] = 1024
         elif ep["engine"] == "ollama":
             card_req_json["think"] = False
             card_req_json["options"] = {
@@ -7034,13 +8244,26 @@ def _free_port_on_windows(port: int) -> bool:
     return False
 
 
-# ==================== 一键更新系统（直连 hf-mirror 优先 · 零损存档与模型 · 自动备份与热重启） ====================
+# ==================== 一键更新系统（直连 hf-mirror 优先 · 零损存档与模型 · 内存热更新 + 自动备份兜底） ====================
 UPDATE_HF_REPO = "dongfangshuo/Easy-TRPG"
 UPDATE_GH_REPO = "ovopaotai-lab/Easy-TRPG"
 _UVICORN_SERVER: Optional[uvicorn.Server] = None
 _PENDING_RESTART_AFTER_UPDATE: bool = False
 _RESTART_BYPASS_SUPERVISOR: bool = False
 _UPDATE_LOCK = asyncio.Lock()
+
+
+class _HotSwappableASGI:
+    """零停机热更新 ASGI 动态分发器：不断开监听端口、不卸载本地显存模型，毫秒级切换新版 FastAPI 实例"""
+    def __init__(self, target_app: Any):
+        self.target_app = target_app
+        self.reload_count = 0
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        await self.target_app(scope, receive, send)
+
+
+_ASGI_DISPATCHER: Optional[_HotSwappableASGI] = None
 
 
 def _normalize_version_display(ver: str) -> str:
@@ -7084,6 +8307,18 @@ def _compare_versions(v1: str, v2: str) -> int:
     if t1 < t2:
         return -1
     return 0
+
+
+try:
+    _vj_file = BASE_DIR / "version.json"
+    if _vj_file.exists():
+        _vj_obj = json.loads(_vj_file.read_text(encoding="utf-8"))
+        _vj_ver = _normalize_version_display(str(_vj_obj.get("version") or ""))
+        if _vj_ver and _compare_versions(_vj_ver, APP_VERSION) > 0:
+            APP_VERSION = _vj_ver
+            app.version = APP_VERSION
+except Exception:
+    pass
 
 
 def _resolve_configured_proxy_url(username: str = "player") -> str:
@@ -7298,6 +8533,8 @@ async def _download_update_archive_bytes(
     allow_proxy: bool = False,
     username: str = "player",
     expected_size_mb: float = 0.5,
+    expected_size_bytes: int = 0,
+    progress_cb: Optional[Callable[[int, int], Awaitable[None]]] = None,
 ) -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
     """优先直连下载更新包（上限保护 60MB）；直连失败时必须先报体积经用户同意后才允许走代理"""
     headers = {"User-Agent": f"Easy-TRPG-Updater/{APP_VERSION}"}
@@ -7311,13 +8548,24 @@ async def _download_update_archive_bytes(
                 async with client.stream("GET", u, timeout=45.0) as resp:
                     if resp.status_code != 200:
                         continue
+                    content_len = 0
+                    try:
+                        content_len = int(resp.headers.get("content-length") or 0)
+                    except Exception:
+                        content_len = 0
+                    target_total = content_len or int(expected_size_bytes or 0)
                     chunks: List[bytes] = []
                     total = 0
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    async for chunk in resp.aiter_bytes(chunk_size=16384):
                         total += len(chunk)
                         if total > max_update_bytes:
                             raise ValueError("更新包体积异常超出安全上限 (60MB)，已中止下载")
                         chunks.append(chunk)
+                        if progress_cb is not None:
+                            try:
+                                await progress_cb(total, target_total)
+                            except Exception:
+                                pass
                     raw = b"".join(chunks)
                     if len(raw) > 1024:
                         return raw
@@ -7534,12 +8782,115 @@ def _apply_update_zip_bytes(zip_bytes: bytes, expected_sha256: str = "", target_
     }
 
 
+def _perform_backend_hot_reload(changed_rels: List[str], target_version: str = "") -> Dict[str, Any]:
+    """在当前进程内执行零停机热更新：
+    1. 若仅静态资源 / 配置变更：刷新版本号与缓存指纹，0ms 无感生效；
+    2. 若 Python 后端变更：热重载 enterprise_engine 并构建新 FastAPI 实例原子切换至 _ASGI_DISPATCHER，不断端口、不卸载本地显存模型。
+    """
+    global APP_VERSION, _SERVER_BOOT_ID
+    norm_ver = _normalize_version_display(target_version) if target_version else APP_VERSION
+    py_changed = any(str(r).lower().endswith(".py") for r in (changed_rels or []))
+    main_mod = sys.modules.get("__main__")
+
+    if not py_changed:
+        if norm_ver:
+            APP_VERSION = norm_ver
+            app.version = APP_VERSION
+        _SERVER_BOOT_ID = uuid.uuid4().hex[:10]
+        if main_mod is not None:
+            setattr(main_mod, "APP_VERSION", APP_VERSION)
+            setattr(main_mod, "_SERVER_BOOT_ID", _SERVER_BOOT_ID)
+        _set_windows_console_title(f"AI 跑团 ({APP_VERSION})")
+        return {
+            "hot_updated": True,
+            "mode": "static_hot",
+            "boot_id": _SERVER_BOOT_ID,
+            "version": APP_VERSION,
+        }
+
+    dispatcher = _ASGI_DISPATCHER or getattr(main_mod, "_ASGI_DISPATCHER", None)
+    uv_srv = _UVICORN_SERVER or getattr(main_mod, "_UVICORN_SERVER", None)
+    if dispatcher is None:
+        return {"hot_updated": False, "reason": "no_asgi_dispatcher"}
+
+    try:
+        ee_mod = sys.modules.get("enterprise_engine")
+        if ee_mod is not None:
+            alive_procs = [p for p in getattr(ee_mod, "_SPAWNED_ENGINE_PROCS", []) if p and p.poll() is None]
+            strata_port = getattr(ee_mod, "_ACTIVE_STRATA_PORT", 8080)
+            llama_port = getattr(ee_mod, "_ACTIVE_LLAMA_PORT", 8081)
+            hf_tasks = dict(getattr(ee_mod, "HF_DOWNLOAD_TASKS", {}))
+            hf_async = dict(getattr(ee_mod, "HF_DOWNLOAD_ASYNC_TASKS", {}))
+            win32_job = getattr(ee_mod, "_WIN32_ENGINE_JOB_HANDLE", None)
+            win32_ctrl = getattr(ee_mod, "_WIN32_CONSOLE_CTRL_REF", None)
+            if win32_job:
+                setattr(sys, "_trpg_win32_engine_job_handle", win32_job)
+            if win32_ctrl is not None:
+                setattr(sys, "_trpg_win32_console_ctrl_ref", win32_ctrl)
+            ee_mod = importlib.reload(ee_mod)
+            ee_mod._SPAWNED_ENGINE_PROCS[:] = alive_procs
+            ee_mod._ACTIVE_STRATA_PORT = strata_port
+            ee_mod._ACTIVE_LLAMA_PORT = llama_port
+            if win32_job:
+                ee_mod._WIN32_ENGINE_JOB_HANDLE = win32_job
+            if win32_ctrl is not None:
+                ee_mod._WIN32_CONSOLE_CTRL_REF = win32_ctrl
+            ee_mod.HF_DOWNLOAD_TASKS.update(hf_tasks)
+            ee_mod.HF_DOWNLOAD_ASYNC_TASKS.update(hf_async)
+            ee_mod.set_active_web_server_port(SERVER_PORT)
+
+        mod_name = f"_trpg_hot_srv_{int(time.time() * 1000)}_{uuid.uuid4().hex[:4]}"
+        spec = importlib.util.spec_from_file_location(mod_name, str(BASE_DIR / "server.py"))
+        if spec is None or spec.loader is None:
+            return {"hot_updated": False, "reason": "spec_load_failed"}
+        new_srv = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = new_srv
+        spec.loader.exec_module(new_srv)
+
+        new_srv.SERVER_PORT = SERVER_PORT
+        new_srv._UVICORN_SERVER = uv_srv
+        new_srv._ASGI_DISPATCHER = dispatcher
+        new_srv._HAS_ACTIVE_CLIENT = True
+        new_srv._PENDING_BROWSER_OPEN_URL = None
+        if norm_ver and _compare_versions(norm_ver, getattr(new_srv, "APP_VERSION", "")) > 0:
+            new_srv.APP_VERSION = norm_ver
+            new_srv.app.version = norm_ver
+
+        dispatcher.target_app = new_srv.app
+        dispatcher.reload_count = getattr(dispatcher, "reload_count", 0) + 1
+        if main_mod is not None:
+            setattr(main_mod, "APP_VERSION", new_srv.APP_VERSION)
+            setattr(main_mod, "_SERVER_BOOT_ID", new_srv._SERVER_BOOT_ID)
+
+        stale_mods = [k for k in list(sys.modules.keys()) if k.startswith("_trpg_hot_srv_") and k != mod_name]
+        for sk in stale_mods:
+            sys.modules.pop(sk, None)
+
+        _set_windows_console_title(f"AI 跑团 ({new_srv.APP_VERSION})")
+        print(f"\n[热更新] 已完成内存零停机热替换 -> {new_srv.APP_VERSION} (reload #{dispatcher.reload_count})")
+        return {
+            "hot_updated": True,
+            "mode": "asgi_hot_swap",
+            "boot_id": new_srv._SERVER_BOOT_ID,
+            "version": new_srv.APP_VERSION,
+        }
+    except Exception as exc:
+        print(f"\n[热更新] 内存热替换异常，自动回退至平滑重启: {exc}")
+        return {"hot_updated": False, "reason": str(exc)}
+
+
 async def _trigger_graceful_self_restart(delay_sec: float = 0.6) -> None:
     global _PENDING_RESTART_AFTER_UPDATE
     await asyncio.sleep(max(0.1, delay_sec))
     _PENDING_RESTART_AFTER_UPDATE = True
-    if _UVICORN_SERVER is not None:
-        _UVICORN_SERVER.should_exit = True
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None:
+        setattr(main_mod, "_PENDING_RESTART_AFTER_UPDATE", True)
+        if _RESTART_BYPASS_SUPERVISOR:
+            setattr(main_mod, "_RESTART_BYPASS_SUPERVISOR", True)
+    uv_srv = _UVICORN_SERVER or getattr(main_mod, "_UVICORN_SERVER", None)
+    if uv_srv is not None:
+        uv_srv.should_exit = True
 
 
 @app.get("/api/system/version")
@@ -7549,6 +8900,18 @@ def api_system_version():
         "version": APP_VERSION,
         "boot_id": _SERVER_BOOT_ID,
     }
+
+
+class DevHotReloadRequest(BaseModel):
+    changed_files: List[str] = ["server.py", "enterprise_engine.py"]
+    target_version: str = ""
+
+
+@app.post("/api/system/dev/hot_reload", dependencies=[Depends(require_loopback)])
+async def api_system_dev_hot_reload(req: DevHotReloadRequest):
+    """供本地纯净开发母本 sync_to_personal.py 单向推送代码后，零停机热重载个人工作台内存实例"""
+    info = _perform_backend_hot_reload(req.changed_files or ["server.py", "enterprise_engine.py"], req.target_version)
+    return {"ok": True, **info}
 
 
 @app.get("/api/system/update/check")
@@ -7623,22 +8986,20 @@ async def api_system_update_apply(req: SystemUpdateApplyRequest, request: Reques
 
         remote_ver = _normalize_version_display(str(mf.get("version") or APP_VERSION))
         cmp_res = _compare_versions(remote_ver, APP_VERSION)
-        if cmp_res < 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"远端公开包版本 ({remote_ver}) 低于当前本地版本 ({APP_VERSION})，已自动拦截降级覆盖。",
-            )
-        if cmp_res == 0 and not req.force_reinstall:
+        if cmp_res < 0 or (cmp_res == 0 and not req.force_reinstall):
             return {
                 "ok": True,
                 "already_latest": True,
+                "can_repair": bool(cmp_res == 0),
                 "old_version": APP_VERSION,
                 "new_version": APP_VERSION,
+                "hot_updated": False,
                 "restarting": False,
                 "message": f"当前已是最新版本 ({APP_VERSION})",
             }
 
-        est_mb = round(max(0.1, int(mf.get("size_bytes") or 490_000) / (1024 * 1024)), 2)
+        expected_bytes = int(mf.get("size_bytes") or 490_000)
+        est_mb = round(max(0.1, expected_bytes / (1024 * 1024)), 2)
         dl_urls = list(mf.get("download_urls") or [])
         if not dl_urls:
             raise HTTPException(status_code=502, detail="未找到有效的更新包下载地址")
@@ -7648,6 +9009,7 @@ async def api_system_update_apply(req: SystemUpdateApplyRequest, request: Reques
             allow_proxy=req.allow_proxy,
             username=username,
             expected_size_mb=est_mb,
+            expected_size_bytes=expected_bytes,
         )
         if zip_bytes is None:
             return JSONResponse(status_code=200, content=dl_err or {"ok": False, "message": "下载更新包失败"})
@@ -7662,13 +9024,2247 @@ async def api_system_update_apply(req: SystemUpdateApplyRequest, request: Reques
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"更新包校验或写入失败（原文件未受损）：{e}")
 
-        asyncio.create_task(_trigger_graceful_self_restart(0.6))
+        changed_rels = list(apply_res.get("updated_files") or [])
+        frontend_js_or_html_changed = any(
+            r == "static/index.html" or (r.startswith("static/") and r.lower().endswith(".js"))
+            for r in changed_rels
+        )
+        frontend_css_changed = any(
+            r.startswith("static/") and r.lower().endswith(".css")
+            for r in changed_rels
+        )
+        hot_info = _perform_backend_hot_reload(changed_rels, str(apply_res.get("new_version") or remote_ver))
+        hot_ok = bool(hot_info.get("hot_updated"))
+        if not hot_ok:
+            asyncio.create_task(_trigger_graceful_self_restart(0.5))
+
         return {
             "ok": True,
-            "restarting": True,
-            "boot_id": _SERVER_BOOT_ID,
+            "hot_updated": hot_ok,
+            "hot_mode": hot_info.get("mode", ""),
+            "restarting": not hot_ok,
+            "frontend_reload_needed": frontend_js_or_html_changed,
+            "css_hot_swap": frontend_css_changed,
+            "boot_id": hot_info.get("boot_id") or _SERVER_BOOT_ID,
             **apply_res,
         }
+
+
+@app.post("/api/system/update/stream", dependencies=[Depends(require_loopback)])
+async def api_system_update_stream(req: SystemUpdateApplyRequest, request: Request):
+    """流式一键热更新接口：单次请求串行推送「检查 -> 分块下载进度 -> 校验备份 -> 内存零停机热更新」实时百分比"""
+    if _UPDATE_LOCK.locked():
+        raise HTTPException(status_code=409, detail="正在执行更新任务，请勿重复点击")
+
+    username = get_current_user(request)
+
+    async def _ndjson_gen():
+        def _pack(payload: Dict[str, Any]) -> bytes:
+            return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+        async with _UPDATE_LOCK:
+            if not req.force:
+                running_chats = [cid for cid, t in ACTIVE_BG_TASKS.items() if t and not t.done()]
+                if running_chats:
+                    yield _pack({
+                        "ok": False,
+                        "stage": "error",
+                        "percent": 0,
+                        "message": "当前有正在生成的对话回复，请先停止生成或等待完成后再更新。",
+                    })
+                    return
+                active_dls = [
+                    t for t in HF_DOWNLOAD_TASKS.values()
+                    if isinstance(t, dict) and t.get("status") in ("downloading", "starting")
+                ]
+                if active_dls:
+                    yield _pack({
+                        "ok": False,
+                        "stage": "error",
+                        "percent": 0,
+                        "message": "当前后台正在下载本地模型，请等待下载完成或先暂停下载后再更新。",
+                    })
+                    return
+
+            yield _pack({
+                "ok": True,
+                "stage": "checking",
+                "percent": 10,
+                "current_version": APP_VERSION,
+                "message": "正在直连镜像源检查最新版本...",
+            })
+            mf = await _fetch_remote_update_manifest(allow_proxy=req.allow_proxy, username=username)
+            if not mf.get("ok"):
+                yield _pack({
+                    "ok": False,
+                    "stage": "need_proxy" if mf.get("need_proxy_confirm") else "error",
+                    "percent": 12,
+                    "current_version": APP_VERSION,
+                    "need_proxy_confirm": bool(mf.get("need_proxy_confirm")),
+                    "estimated_size_mb": mf.get("estimated_size_mb", 0.5),
+                    "message": mf.get("message") or "无法获取更新信息",
+                })
+                return
+
+            remote_ver = _normalize_version_display(str(mf.get("version") or APP_VERSION))
+            cmp_res = _compare_versions(remote_ver, APP_VERSION)
+            expected_bytes = int(mf.get("size_bytes") or 490_000)
+            est_mb = round(max(0.1, expected_bytes / (1024 * 1024)), 2)
+
+            if cmp_res < 0 or (cmp_res == 0 and not req.force_reinstall):
+                yield _pack({
+                    "ok": True,
+                    "stage": "done",
+                    "already_latest": True,
+                    "hot_updated": False,
+                    "restarting": False,
+                    "percent": 100,
+                    "old_version": APP_VERSION,
+                    "new_version": APP_VERSION,
+                    "remote_version": remote_ver,
+                    "can_repair": bool(cmp_res == 0),
+                    "size_mb": est_mb,
+                    "boot_id": _SERVER_BOOT_ID,
+                    "message": f"当前已是最新版本 ({APP_VERSION})",
+                })
+                return
+
+            dl_urls = list(mf.get("download_urls") or [])
+            if not dl_urls:
+                yield _pack({"ok": False, "stage": "error", "percent": 15, "message": "未找到有效的更新包下载地址"})
+                return
+
+            action_label = "重新校验热修复" if (cmp_res == 0 and req.force_reinstall) else f"更新至 {remote_ver}"
+            yield _pack({
+                "ok": True,
+                "stage": "manifest",
+                "percent": 18,
+                "old_version": APP_VERSION,
+                "latest_version": remote_ver,
+                "size_bytes": expected_bytes,
+                "size_mb": est_mb,
+                "source": mf.get("source") or "hf-mirror.com",
+                "notes": mf.get("notes") or "",
+                "message": f"准备{action_label}（约 {est_mb} MB，来源：{mf.get('source') or 'hf-mirror.com'}）...",
+            })
+
+            prog_q: asyncio.Queue = asyncio.Queue()
+            last_emit_ts = 0.0
+            last_emit_pct = 18
+
+            async def _on_dl_progress(dl_bytes: int, tot_bytes: int) -> None:
+                nonlocal last_emit_ts, last_emit_pct
+                now = time.monotonic()
+                denom = max(tot_bytes, expected_bytes, dl_bytes, 1)
+                ratio = min(1.0, max(0.0, dl_bytes / denom))
+                pct = min(78, max(19, int(round(18 + ratio * 60))))
+                if pct > last_emit_pct or (now - last_emit_ts) >= 0.05:
+                    last_emit_ts = now
+                    last_emit_pct = pct
+                    dl_mb_s = f"{dl_bytes / (1024 * 1024):.2f}"
+                    tot_mb_s = f"{denom / (1024 * 1024):.2f}"
+                    await prog_q.put({
+                        "ok": True,
+                        "stage": "downloading",
+                        "percent": pct,
+                        "downloaded_bytes": dl_bytes,
+                        "total_bytes": denom,
+                        "latest_version": remote_ver,
+                        "message": f"正在下载更新包 ({dl_mb_s} / {tot_mb_s} MB)...",
+                    })
+
+            dl_task = asyncio.create_task(
+                _download_update_archive_bytes(
+                    dl_urls,
+                    allow_proxy=req.allow_proxy,
+                    username=username,
+                    expected_size_mb=est_mb,
+                    expected_size_bytes=expected_bytes,
+                    progress_cb=_on_dl_progress,
+                )
+            )
+            while not dl_task.done():
+                try:
+                    ev = await asyncio.wait_for(prog_q.get(), timeout=0.06)
+                    yield _pack(ev)
+                except asyncio.TimeoutError:
+                    pass
+            while not prog_q.empty():
+                yield _pack(prog_q.get_nowait())
+
+            zip_bytes, dl_err = await dl_task
+            if zip_bytes is None:
+                err_obj = dl_err or {"ok": False, "message": "下载更新包失败"}
+                yield _pack({
+                    "ok": False,
+                    "stage": "need_proxy" if err_obj.get("need_proxy_confirm") else "error",
+                    "percent": last_emit_pct,
+                    "need_proxy_confirm": bool(err_obj.get("need_proxy_confirm")),
+                    "estimated_size_mb": err_obj.get("estimated_size_mb", est_mb),
+                    "message": err_obj.get("message") or "下载更新包失败",
+                })
+                return
+
+            yield _pack({
+                "ok": True,
+                "stage": "verifying",
+                "percent": 85,
+                "latest_version": remote_ver,
+                "message": "下载完成，正在校验代码语法与备份旧版文件...",
+            })
+
+            try:
+                apply_res = await asyncio.to_thread(
+                    _apply_update_zip_bytes,
+                    zip_bytes,
+                    str(mf.get("sha256") or ""),
+                    remote_ver,
+                )
+            except Exception as e:
+                yield _pack({
+                    "ok": False,
+                    "stage": "error",
+                    "percent": 85,
+                    "message": f"更新包校验或写入失败（原文件未受损）：{e}",
+                })
+                return
+
+            changed_rels = list(apply_res.get("updated_files") or [])
+            yield _pack({
+                "ok": True,
+                "stage": "applying",
+                "percent": 94,
+                "updated_count": apply_res.get("updated_count", 0),
+                "latest_version": apply_res.get("new_version") or remote_ver,
+                "message": f"已原子替换 {apply_res.get('updated_count', 0)} 个变更文件，正在执行内存热更新...",
+            })
+
+            frontend_js_or_html_changed = any(
+                r == "static/index.html" or (r.startswith("static/") and r.lower().endswith(".js"))
+                for r in changed_rels
+            )
+            frontend_css_changed = any(
+                r.startswith("static/") and r.lower().endswith(".css")
+                for r in changed_rels
+            )
+
+            hot_info = _perform_backend_hot_reload(changed_rels, str(apply_res.get("new_version") or remote_ver))
+            hot_ok = bool(hot_info.get("hot_updated"))
+            if not hot_ok:
+                asyncio.create_task(_trigger_graceful_self_restart(0.5))
+
+            final_ver_disp = apply_res.get("new_version") or remote_ver
+            yield _pack({
+                "ok": True,
+                "stage": "done",
+                "already_latest": False,
+                "percent": 100,
+                "hot_updated": hot_ok,
+                "hot_mode": hot_info.get("mode", ""),
+                "restarting": not hot_ok,
+                "frontend_reload_needed": frontend_js_or_html_changed,
+                "css_hot_swap": frontend_css_changed,
+                "boot_id": hot_info.get("boot_id") or _SERVER_BOOT_ID,
+                **apply_res,
+                "message": (
+                    f"热更新完成！已升级至 {final_ver_disp}"
+                    if hot_ok
+                    else f"更新文件已就绪，正在平滑切换至 {final_ver_disp}..."
+                ),
+            })
+
+    return StreamingResponse(
+        _ndjson_gen(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ==================== 机器硬件实时遥测与全维度模型性能测试引擎 ====================
+_BENCH_STATIC_CPU_CACHE: Dict[str, Any] = {}
+_BENCH_PREV_CPU_TIMES: Tuple[int, int, float] = (0, 0, 0.0)
+_BENCH_CPU_LOCK = threading.Lock()
+
+
+def _get_static_cpu_info() -> Tuple[str, int]:
+    if _BENCH_STATIC_CPU_CACHE.get("name"):
+        return _BENCH_STATIC_CPU_CACHE["name"], _BENCH_STATIC_CPU_CACHE["threads"]
+    import platform
+    cpu_name = ""
+    cpu_mhz = 0
+    threads = os.cpu_count() or 1
+    os_name = f"{platform.system()} {platform.release()}"
+    board_name = ""
+    disk_models: List[str] = []
+    try:
+        if os.name == "nt":
+            import winreg
+
+            def _rv(subk: str, vname: str) -> str:
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subk) as k:
+                        return str(winreg.QueryValueEx(k, vname)[0] or "").strip()
+                except Exception:
+                    return ""
+
+            cpu_name = _rv(r"HARDWARE\Description\System\CentralProcessor\0", "ProcessorNameString")
+            mhz_raw = _rv(r"HARDWARE\Description\System\CentralProcessor\0", "~MHz")
+            if mhz_raw.isdigit():
+                cpu_mhz = int(mhz_raw)
+
+            win_prod = _rv(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName")
+            win_disp = _rv(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "DisplayVersion")
+            win_build = _rv(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuild")
+            if win_build.isdigit() and int(win_build) >= 22000 and "Windows 10" in win_prod:
+                win_prod = win_prod.replace("Windows 10", "Windows 11")
+            if win_prod:
+                os_name = " ".join(x for x in [win_prod, win_disp, f"(Build {win_build})" if win_build else ""] if x)
+
+            mb_mfg = _rv(r"HARDWARE\Description\System\BIOS", "BaseBoardManufacturer") or _rv(
+                r"HARDWARE\Description\System\BIOS", "SystemManufacturer"
+            )
+            mb_prod = _rv(r"HARDWARE\Description\System\BIOS", "BaseBoardProduct") or _rv(
+                r"HARDWARE\Description\System\BIOS", "SystemProductName"
+            )
+            for junk in ("System manufacturer", "System Product Name", "To be filled by O.E.M.", "Default string"):
+                mb_mfg = mb_mfg.replace(junk, "").strip()
+                mb_prod = mb_prod.replace(junk, "").strip()
+            board_name = f"{mb_mfg} {mb_prod}".strip()
+
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\disk\Enum") as dk:
+                    cnt = int(winreg.QueryValueEx(dk, "Count")[0])
+                    for i in range(cnt):
+                        raw_d = str(winreg.QueryValueEx(dk, str(i))[0])
+                        if "Prod_" in raw_d:
+                            part = (
+                                raw_d.split("Prod_", 1)[1]
+                                .split("\\", 1)[0]
+                                .split("&Rev_", 1)[0]
+                                .replace("_", " ")
+                                .strip(" -")
+                            )
+                            if part and part not in disk_models:
+                                disk_models.append(part)
+            except Exception:
+                pass
+        elif Path("/proc/cpuinfo").exists():
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+                if "model name" in line.lower() and ":" in line:
+                    cpu_name = line.split(":", 1)[1].strip()
+                    break
+            if Path("/etc/os-release").exists():
+                for ln in Path("/etc/os-release").read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if ln.startswith("PRETTY_NAME="):
+                        os_name = ln.split("=", 1)[1].strip().strip('"')
+                        break
+        elif sys.platform == "darwin":
+            cpu_name = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], text=True, timeout=1.5
+            ).strip()
+            os_name = f"macOS {platform.mac_ver()[0]}"
+    except Exception:
+        pass
+    if not cpu_name:
+        cpu_name = platform.processor() or platform.machine() or "Generic CPU"
+    _BENCH_STATIC_CPU_CACHE.update({
+        "name": cpu_name,
+        "threads": threads,
+        "mhz": cpu_mhz,
+        "os_name": os_name,
+        "board_name": board_name,
+        "disk_models": disk_models,
+        "drive_root": BASE_DIR.anchor or str(BASE_DIR)[:3],
+    })
+    return cpu_name, threads
+
+
+def _read_raw_cpu_times() -> Optional[Tuple[int, int]]:
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _FT(ctypes.Structure):
+                _fields_ = [("low", ctypes.c_ulong), ("high", ctypes.c_ulong)]
+
+            idle_ft, kern_ft, user_ft = _FT(), _FT(), _FT()
+            if ctypes.windll.kernel32.GetSystemTimes(
+                ctypes.byref(idle_ft), ctypes.byref(kern_ft), ctypes.byref(user_ft)
+            ):
+                idle = (idle_ft.high << 32) | idle_ft.low
+                total = ((kern_ft.high << 32) | kern_ft.low) + ((user_ft.high << 32) | user_ft.low)
+                return (idle, total)
+        elif Path("/proc/stat").exists():
+            first = Path("/proc/stat").read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+            parts = [int(x) for x in first.split()[1:] if x.isdigit()]
+            if len(parts) >= 4:
+                idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+                return (idle, sum(parts))
+    except Exception:
+        pass
+    return None
+
+
+def _sample_cpu_percent_fast() -> float:
+    global _BENCH_PREV_CPU_TIMES
+    with _BENCH_CPU_LOCK:
+        now = time.monotonic()
+        t1 = _read_raw_cpu_times()
+        if t1 is None:
+            return 0.0
+        prev_idle, prev_tot, prev_ts = _BENCH_PREV_CPU_TIMES
+        if prev_tot <= 0 or (now - prev_ts) > 12.0 or t1[1] <= prev_tot:
+            time.sleep(0.045)
+            t2 = _read_raw_cpu_times()
+            if t2 is None or t2[1] <= t1[1]:
+                _BENCH_PREV_CPU_TIMES = (t1[0], t1[1], time.monotonic())
+                return 0.0
+            d_idle = t2[0] - t1[0]
+            d_tot = t2[1] - t1[1]
+            _BENCH_PREV_CPU_TIMES = (t2[0], t2[1], time.monotonic())
+        else:
+            d_idle = t1[0] - prev_idle
+            d_tot = t1[1] - prev_tot
+            _BENCH_PREV_CPU_TIMES = (t1[0], t1[1], now)
+        return round(max(0.0, min(100.0, (1.0 - (d_idle / max(1, d_tot))) * 100.0)), 1)
+
+
+def _sample_ram_status() -> Dict[str, Any]:
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MEMSTAT(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            ms = _MEMSTAT()
+            ms.dwLength = ctypes.sizeof(_MEMSTAT)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+                tot_g = ms.ullTotalPhys / (1024**3)
+                avail_g = ms.ullAvailPhys / (1024**3)
+                used_g = max(0.0, tot_g - avail_g)
+                return {
+                    "total_gib": round(tot_g, 1),
+                    "used_gib": round(used_g, 1),
+                    "avail_gib": round(avail_g, 1),
+                    "percent": round((used_g / max(0.1, tot_g)) * 100.0, 1),
+                }
+        elif Path("/proc/meminfo").exists():
+            kv: Dict[str, int] = {}
+            for ln in Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+                if ":" in ln:
+                    k, v = ln.split(":", 1)
+                    nums = [int(x) for x in v.split() if x.isdigit()]
+                    if nums:
+                        kv[k.strip()] = nums[0]
+            tot_kb = kv.get("MemTotal", 0)
+            avail_kb = kv.get("MemAvailable", kv.get("MemFree", 0))
+            if tot_kb > 0:
+                tot_g = tot_kb / (1024**2)
+                avail_g = avail_kb / (1024**2)
+                used_g = max(0.0, tot_g - avail_g)
+                return {
+                    "total_gib": round(tot_g, 1),
+                    "used_gib": round(used_g, 1),
+                    "avail_gib": round(avail_g, 1),
+                    "percent": round((used_g / max(0.1, tot_g)) * 100.0, 1),
+                }
+    except Exception:
+        pass
+    fallback_tot = float(_detect_system_ram_gib() or 16)
+    return {"total_gib": fallback_tot, "used_gib": 0.0, "avail_gib": fallback_tot, "percent": 0.0}
+
+
+def _sample_gpu_telemetry() -> Dict[str, Any]:
+    cf = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw,power.limit",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            creationflags=cf,
+            timeout=1.6,
+        ).strip()
+        if out:
+            best_row = None
+            best_vram = -1.0
+            for raw_ln in out.splitlines():
+                cols = [c.strip() for c in raw_ln.split(",")]
+                if len(cols) >= 6:
+                    def _pf(s: str) -> float:
+                        try:
+                            return float(s)
+                        except Exception:
+                            return 0.0
+                    vt = _pf(cols[2])
+                    if vt > best_vram:
+                        best_vram = vt
+                        best_row = cols
+            if best_row:
+                def _pf2(s: str) -> float:
+                    try:
+                        return float(s)
+                    except Exception:
+                        return 0.0
+                v_tot = _pf2(best_row[2])
+                v_used = _pf2(best_row[3])
+                return {
+                    "available": True,
+                    "vendor": "NVIDIA",
+                    "name": best_row[0],
+                    "driver": best_row[1],
+                    "vram_total_mib": int(round(v_tot)),
+                    "vram_used_mib": int(round(v_used)),
+                    "vram_total_gib": round(v_tot / 1024.0, 1),
+                    "vram_used_gib": round(v_used / 1024.0, 2),
+                    "vram_percent": round((v_used / max(1.0, v_tot)) * 100.0, 1),
+                    "gpu_util_pct": round(_pf2(best_row[4]), 1),
+                    "temp_c": int(round(_pf2(best_row[5]))),
+                    "power_w": round(_pf2(best_row[6]), 1) if len(best_row) > 6 else 0.0,
+                    "power_limit_w": round(_pf2(best_row[7]), 1) if len(best_row) > 7 else 0.0,
+                }
+    except Exception:
+        pass
+    vram_fb = detect_gpu_vram_mib()
+    return {
+        "available": bool(vram_fb > 0),
+        "vendor": "Generic",
+        "name": "本机图形处理器" if vram_fb > 0 else "未检测到独立显卡 (CPU / 云端推理)",
+        "driver": "",
+        "vram_total_mib": int(vram_fb),
+        "vram_used_mib": 0,
+        "vram_total_gib": round(vram_fb / 1024.0, 1) if vram_fb > 0 else 0.0,
+        "vram_used_gib": 0.0,
+        "vram_percent": 0.0,
+        "gpu_util_pct": 0.0,
+        "temp_c": 0,
+        "power_w": 0.0,
+        "power_limit_w": 0.0,
+    }
+
+
+def _collect_hardware_telemetry_sync() -> Dict[str, Any]:
+    cpu_name, cpu_threads = _get_static_cpu_info()
+    cpu_pct = _sample_cpu_percent_fast()
+    ram = _sample_ram_status()
+    gpu = _sample_gpu_telemetry()
+    disk_free_gib = 0.0
+    disk_total_gib = 0.0
+    try:
+        du = shutil.disk_usage(str(BASE_DIR))
+        disk_total_gib = round(du.total / (1024**3), 1)
+        disk_free_gib = round(du.free / (1024**3), 1)
+    except Exception:
+        pass
+    std_dimms = [4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512]
+    ram_nominal_gb = next((d for d in std_dimms if ram["total_gib"] <= d + 0.6 and ram["total_gib"] >= d * 0.86), int(round(ram["total_gib"])))
+    return {
+        "ok": True,
+        "ts": time.time(),
+        "system_specs": {
+            "os_name": _BENCH_STATIC_CPU_CACHE.get("os_name", ""),
+            "board_name": _BENCH_STATIC_CPU_CACHE.get("board_name", ""),
+            "cpu_full": cpu_name,
+            "cpu_threads": cpu_threads,
+            "cpu_mhz": _BENCH_STATIC_CPU_CACHE.get("cpu_mhz", 0),
+            "ram_nominal_gb": ram_nominal_gb,
+            "ram_total_gib": ram["total_gib"],
+            "gpu_full": gpu["name"],
+            "gpu_vram_gib": gpu["vram_total_gib"],
+            "gpu_vram_mib": gpu["vram_total_mib"],
+            "gpu_driver": gpu["driver"],
+            "drive_root": _BENCH_STATIC_CPU_CACHE.get("drive_root", ""),
+            "disk_models": _BENCH_STATIC_CPU_CACHE.get("disk_models", []),
+            "disk_total_gib": disk_total_gib,
+            "disk_free_gib": disk_free_gib,
+        },
+        "cpu": {
+            "name": cpu_name,
+            "threads": cpu_threads,
+            "mhz": _BENCH_STATIC_CPU_CACHE.get("cpu_mhz", 0),
+            "load_pct": cpu_pct,
+        },
+        "ram": ram,
+        "gpu": gpu,
+        "disk": {
+            "total_gib": disk_total_gib,
+            "free_gib": disk_free_gib,
+            "models": _BENCH_STATIC_CPU_CACHE.get("disk_models", []),
+        },
+    }
+
+
+def _run_machine_micro_benchmark_sync() -> Dict[str, Any]:
+    """在约 0.30s 内实测本机 DDR 内存复制带宽、CPU 算力与模型盘顺序读取速率"""
+    # 1. 真实物理内存块复制带宽 (C-level memcpy over 64 MB * 16 = 1 GiB) + CPU 哈希与浮点综合算力
+    copy_blk = 64 * 1024 * 1024
+    src_buf = bytearray(b"\x5a\xa5\x3c\xc3" * (copy_blk // 4))
+    dst_buf = bytearray(copy_blk)
+    copy_iters = 16
+    t_mc0 = time.perf_counter()
+    for _ in range(copy_iters):
+        dst_buf[:] = src_buf
+    dt_mc = max(1e-4, time.perf_counter() - t_mc0)
+    mem_bw_gbps = round(((copy_blk * copy_iters) / (1024**3)) / dt_mc, 1)
+
+    t_cpu0 = time.perf_counter()
+    mv16 = memoryview(src_buf)[: 16 * 1024 * 1024]
+    for r in range(6):
+        hashlib.blake2b(mv16, digest_size=32, person=bytes([r])).digest()
+    acc = 0.0
+    for i in range(1, 180_000):
+        acc += (i * 0.00013) * (1.0007 / (i + 3.0))
+    dt_cpu = max(1e-4, time.perf_counter() - t_cpu0)
+    cpu_score = int(round((120.0 / dt_cpu) * 4.2 + (os.cpu_count() or 4) * 55 + min(600.0, mem_bw_gbps * 8.5) + (0 if acc < -1e9 else 0)))
+
+    # 2. 存储盘顺序读取测速（优先直接读取已有大模型/引擎二进制前 48MB，零写入磨损；若无则使用临时探针并立即清理）
+    probe_candidates: List[Path] = []
+    for search_dir in (BASE_DIR / "models", BASE_DIR / "model", BASE_DIR / "engine", BASE_DIR / "runtime"):
+        if search_dir.exists():
+            try:
+                for p in search_dir.rglob("*"):
+                    if p.is_file():
+                        sz = p.stat().st_size
+                        if sz >= 16 * 1024 * 1024:
+                            probe_candidates.append(p)
+                            if sz >= 64 * 1024 * 1024:
+                                break
+                if probe_candidates:
+                    break
+            except Exception:
+                pass
+
+    temp_probe: Optional[Path] = None
+    disk_read_mbps = 0.0
+    try:
+        if probe_candidates:
+            target_f = max(probe_candidates, key=lambda x: x.stat().st_size)
+            max_read = 64 * 1024 * 1024
+        else:
+            temp_probe = DATA_DIR / f".bench_io_{uuid.uuid4().hex[:6]}.tmp"
+            payload_1m = os.urandom(1024 * 1024)
+            with open(temp_probe, "wb") as wf:
+                for _ in range(16):
+                    wf.write(payload_1m)
+                wf.flush()
+            target_f = temp_probe
+            max_read = 16 * 1024 * 1024
+
+        read_bytes = 0
+        t_io0 = time.perf_counter()
+        with open(target_f, "rb", buffering=0) as rf:
+            while read_bytes < max_read:
+                chk = rf.read(1024 * 1024)
+                if not chk:
+                    break
+                read_bytes += len(chk)
+        dt_io = max(1e-4, time.perf_counter() - t_io0)
+        disk_read_mbps = round((read_bytes / (1024 * 1024)) / dt_io, 1)
+    except Exception:
+        disk_read_mbps = 0.0
+    finally:
+        if temp_probe and temp_probe.exists():
+            try:
+                temp_probe.unlink()
+            except Exception:
+                pass
+
+    return {
+        "cpu_score": cpu_score,
+        "mem_bw_gbps": mem_bw_gbps,
+        "disk_read_mbps": disk_read_mbps,
+    }
+
+
+def _estimate_mixed_tokens(text: str, sse_chunks: int = 0) -> int:
+    if not text:
+        return 0
+    cjk = len(re.findall(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", text))
+    non_cjk_text = re.sub(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", " ", text)
+    ascii_words = len(re.findall(r"[A-Za-z0-9_]+|[^\sA-Za-z0-9_]", non_cjk_text))
+    est = max(1, int(round(cjk * 0.68 + ascii_words * 0.85)))
+    if sse_chunks >= 8 and 0.55 * est <= sse_chunks <= 1.85 * est:
+        return sse_chunks
+    return est
+
+
+@app.get("/api/system/benchmark/telemetry")
+async def api_system_benchmark_telemetry():
+    return await asyncio.to_thread(_collect_hardware_telemetry_sync)
+
+
+def _build_trpg_32k_context_text(target_tokens: int = 31500, nonce: str = "") -> str:
+    """动态生成指定 Token 规模（默认约 32K）的结构化跑团世界书与多轮战役档案，并在中段埋入大海捞针锚点（卷宗 #17）"""
+    target_tokens = max(2048, min(98304, int(target_tokens)))
+    # 校准 Qwen/Llama 分词器在含编号符号中文长文上的 ~1.24x 细分倍率，确保 32K 请求精确落在 ~32,000 真实 Token
+    calibrated_est_target = max(1600, int(target_tokens * 0.81))
+    header = f"【战役全局世界书与历史推演长卷 · 会话标识 {nonce or 'BENCH-32K'}】\n"
+    blocks: List[str] = [header]
+    cur_est = _estimate_mixed_tokens(header)
+    sec_i = 1
+    factions = ("灰潮商会", "守夜人卫队", "黑曜石教团", "深海钟表匠行会", "白银审判庭", "铁锈船坞同盟")
+    weathers = ("暴雨如注、海雾弥漫", "铅灰浓雾笼罩码头", "冷冽咸腥的朔风呼啸", "霓虹倒映在油污积水间")
+    while cur_est < calibrated_est_target:
+        fac = factions[sec_i % len(factions)]
+        wth = weathers[sec_i % len(weathers)]
+        freq = f"{140 + sec_i}.5" if sec_i != 17 else "157.5"
+        code_word = f"白鸦-{sec_i}" if sec_i != 17 else "白鸦-17"
+        blk = (
+            f"【世界书卷宗 #{sec_i:03d} · 雾港第 {sec_i} 扇区勘探与战史记录】"
+            f"本扇区现由「{fac}」与地方巡防哨共同接管，常年处于{wth}的异常气候之下。"
+            f"核心战术地标包含：旧钟楼第 {sec_i * 3} 号地下排水涵洞、高压蒸汽阀门站 B-{sec_i:02d}、"
+            f"黑市物资转运暗仓 C-{sec_i * 2}，以及加密无线电报中继台（工作频段 {freq} MHz）。"
+            f"跑团检定规则：当调查员持有特制银壳怀表或报出接头暗号『{code_word}』进入第 {sec_i} 扇区时，"
+            f"守卫初始警戒值降低 15 点，潜行与话术检定获得 +10 补正；反之若强行破门，将在 3 回合内触发蒸汽警报并引来重装巡逻小队。"
+            f"历史行动纪要（第 {sec_i} 幕）：先遣小队曾在此处与潜伏暗哨交火，遗留了编号 LOG-{1000 + sec_i} 的密封羊皮卷与三枚刻有潮汐纹章的黄铜弹壳。\n"
+        )
+        blocks.append(blk)
+        cur_est += _estimate_mixed_tokens(blk)
+        sec_i += 1
+    return "".join(blocks)
+
+
+class BenchmarkStreamRequest(BaseModel):
+    model: str = ""
+    mode: str = "full"  # "full" (默认32K上下文 + 单次8192吐字 + 60s长时间压测) | "quick"
+    duration_s: float = 60.0
+    context_k: int = 32
+    max_tokens: int = 8192
+
+
+class ParallelBenchmarkRequest(BaseModel):
+    model: str = ""
+    parallel: int = 4   # 1..16 可选并发任务数
+    context_k: int = 32
+    max_tokens: int = 8192
+    duration_s: float = 60.0
+
+
+def _prepare_bench_req_body(
+    ep: Dict[str, Any],
+    messages: List[Dict[str, str]],
+    max_toks: int,
+    temp: float,
+    ollama_num_ctx: int = 40960,
+    force_sustained_decode: bool = False,
+) -> Dict[str, Any]:
+    req_body: Dict[str, Any] = {
+        "model": ep["upstream_model"],
+        "messages": messages,
+        "temperature": temp,
+        "max_tokens": max_toks,
+        "stream": True,
+    }
+    if ep.get("protocol") not in ("claude", "gemini"):
+        req_body["stream_options"] = {"include_usage": True}
+    if ep["is_local"]:
+        if ep["engine"] == "strata":
+            req_body["reasoning_effort"] = "none"
+            req_body["reasoning_budget_tokens"] = 0
+            req_body["chat_template_kwargs"] = {"enable_thinking": False}
+            if force_sustained_decode:
+                req_body["min_tokens"] = max_toks
+        elif ep["engine"] == "llama":
+            req_body["reasoning_budget"] = 0
+            req_body["chat_template_kwargs"] = {"enable_thinking": False}
+            req_body["cache_prompt"] = False
+            if force_sustained_decode:
+                req_body["ignore_eos"] = True
+        elif ep["engine"] == "ollama":
+            req_body["think"] = False
+            req_body["reasoning_effort"] = "none"
+            req_body["thinking_budget_tokens"] = 0
+            req_body["reasoning_budget"] = 0
+            req_body["reasoning_budget_tokens"] = 0
+            req_body["chat_template_kwargs"] = {"enable_thinking": False}
+            req_body["options"] = {"num_ctx": max(8192, int(ollama_num_ctx)), "num_predict": max_toks}
+        else:
+            req_body["think"] = False
+            req_body["reasoning_effort"] = "none"
+            req_body["chat_template_kwargs"] = {"enable_thinking": False}
+    return req_body
+
+
+@app.post("/api/system/benchmark/stream")
+async def api_system_benchmark_stream(req: BenchmarkStreamRequest, request: Request):
+    """全维度机器 + 模型实时流式性能基准测试（全面模式默认 32K 上下文 + 单次吐字 8192 + 持续 1 分钟满载压力测试）"""
+    username = get_current_user(request)
+    settings = load_user_settings(username)
+    target_model = (req.model or "").strip() or str(settings.get("model") or "").strip()
+    is_full = (req.mode or "full").strip().lower() != "quick"
+    burn_duration_s = max(5.0, min(300.0, float(req.duration_s or 60.0)))
+    target_ctx_k = max(8, min(96, safe_int(req.context_k, 32)))
+    single_max_tokens = max(512, min(16384, safe_int(req.max_tokens, 8192)))
+
+    async def _bench_gen():
+        def _pack(obj: Dict[str, Any]) -> bytes:
+            return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
+        if not target_model:
+            yield _pack({"ok": False, "type": "error", "message": "请先选择一个要测试的模型！"})
+            return
+
+        live_hw: Dict[str, Any] = await asyncio.to_thread(_collect_hardware_telemetry_sync)
+        stop_hw_flag = False
+
+        async def _bg_hw_poller():
+            nonlocal live_hw
+            while not stop_hw_flag:
+                await asyncio.sleep(0.42)
+                if stop_hw_flag:
+                    break
+                try:
+                    live_hw = await asyncio.to_thread(_collect_hardware_telemetry_sync)
+                except Exception:
+                    pass
+
+        hw_poller_task = asyncio.create_task(_bg_hw_poller())
+        try:
+            ep = resolve_model_endpoint(target_model, settings)
+            allow_api_stress = os.environ.get("TRPG_ALLOW_API_STRESS_TEST") == "1"
+            if not ep["is_local"] and is_full and not allow_api_stress:
+                yield _pack({
+                    "ok": False,
+                    "type": "error",
+                    "message": "API 模型仅支持快速测试",
+                })
+                return
+
+            total_st = 5
+            # -------- 阶段 1：硬件基准 --------
+            yield _pack({
+                "ok": True,
+                "type": "stage_start",
+                "stage": "hardware",
+                "stage_index": 1,
+                "total_stages": total_st,
+                "percent": 3,
+                "title": "硬件基准",
+                "telemetry": live_hw,
+            })
+            hw_bench = await asyncio.to_thread(_run_machine_micro_benchmark_sync)
+            live_hw = await asyncio.to_thread(_collect_hardware_telemetry_sync)
+            yield _pack({
+                "ok": True,
+                "type": "stage_done",
+                "stage": "hardware",
+                "percent": 8 if is_full else 12,
+                "metrics": hw_bench,
+                "telemetry": live_hw,
+                "summary": f"CPU {hw_bench['cpu_score']} · 内存 {hw_bench['mem_bw_gbps']} GB/s · 磁盘 {hw_bench['disk_read_mbps']} MB/s",
+            })
+
+            # -------- 解析并准备模型引擎 --------
+            bench_ollama_ctx = (
+                get_optimal_ollama_num_ctx(max(42, target_ctx_k + (single_max_tokens // 1024) + 2), min_ctx=16384)
+                if is_full
+                else 8192
+            )
+            engine_ready_ms = 0.0
+            if ep["is_local"]:
+                eng_q: asyncio.Queue = asyncio.Queue()
+
+                async def _eng_status_cb(msg: str) -> None:
+                    await eng_q.put(msg)
+
+                t_eng0 = time.perf_counter()
+                eng_task = asyncio.create_task(
+                    ensure_local_engine_ready(
+                        target_model,
+                        status_callback=_eng_status_cb,
+                        slot_ctx_tokens=bench_ollama_ctx,
+                    )
+                )
+                last_eng_msg = f"启动引擎 ({ep.get('engine', 'local')})..."
+                yield _pack({
+                    "ok": True,
+                    "type": "status",
+                    "percent": 9,
+                    "message": last_eng_msg,
+                    "telemetry": live_hw,
+                })
+                while not eng_task.done():
+                    try:
+                        m_txt = await asyncio.wait_for(eng_q.get(), timeout=0.6)
+                        if m_txt:
+                            last_eng_msg = m_txt
+                    except asyncio.TimeoutError:
+                        pass
+                    elapsed_s = time.perf_counter() - t_eng0
+                    yield _pack({
+                        "ok": True,
+                        "type": "status",
+                        "percent": 10,
+                        "message": f"{last_eng_msg} ({elapsed_s:.1f}s)",
+                        "telemetry": live_hw,
+                    })
+                local_err = await eng_task
+                ep = resolve_model_endpoint(target_model, settings)
+                if local_err:
+                    yield _pack({"ok": False, "type": "error", "message": f"引擎启动失败：{local_err}"})
+                    return
+                if ep.get("engine") == "ollama" and ":11434" in str(ep.get("base_url") or ""):
+                    ollama_root = str(ep["base_url"]).rstrip("/")
+                    if ollama_root.endswith("/v1"):
+                        ollama_root = ollama_root[:-3]
+                    up_mid = str(ep.get("upstream_model") or target_model)
+
+                    async def _preload_ollama_vram() -> None:
+                        try:
+                            async with httpx.AsyncClient(trust_env=False, timeout=180.0) as pc:
+                                await pc.post(
+                                    f"{ollama_root}/api/generate",
+                                    json={
+                                        "model": up_mid,
+                                        "keep_alive": "15m",
+                                        "options": {"num_ctx": bench_ollama_ctx},
+                                    },
+                                )
+                        except Exception:
+                            pass
+
+                    pre_task = asyncio.create_task(_preload_ollama_vram())
+                    while not pre_task.done():
+                        await asyncio.sleep(0.55)
+                        elapsed_s = time.perf_counter() - t_eng0
+                        yield _pack({
+                            "ok": True,
+                            "type": "status",
+                            "percent": 10,
+                            "message": f"加载模型 {up_mid} ({elapsed_s:.1f}s)",
+                            "telemetry": live_hw,
+                        })
+                    await pre_task
+                engine_ready_ms = round((time.perf_counter() - t_eng0) * 1000.0, 1)
+            elif not ep.get("base_url") or (not ep.get("api_key") and not ep.get("is_local")):
+                yield _pack({
+                    "ok": False,
+                    "type": "error",
+                    "message": f"模型「{target_model}」尚未配置有效的 API 地址或密钥，请先在「模型」设置中配置。",
+                })
+                return
+
+            req_headers = ep.get("headers") or {
+                "Authorization": f"Bearer {ep['api_key']}",
+                "Content-Type": "application/json",
+            }
+            proxy_cands = [ep["proxy"], None] if ep.get("proxy") else [None]
+
+            async def _stream_stage_live(
+                stage_key: str,
+                pct_start: int,
+                pct_end: int,
+                messages: List[Dict[str, str]],
+                max_toks: int,
+                result_out: Dict[str, Any],
+                temp: float = 0.4,
+                ollama_ctx: int = 40960,
+                sustained_duration_s: float = 0.0,
+                context_builder_fn: Optional[Callable[[int, str], List[Dict[str, str]]]] = None,
+                target_ctx_tokens: int = 0,
+            ):
+                """通用流式测试执行器：支持单次短请求与 60 秒长时间 32K+8192 续航烤机模式"""
+                q: asyncio.Queue = asyncio.Queue()
+
+                async def _worker():
+                    timeout_cfg = httpx.Timeout(max(180.0, sustained_duration_s + 120.0), connect=20.0)
+                    last_error = ""
+
+                    for cur_proxy in proxy_cands:
+                        all_pieces: List[str] = []
+                        tok_times: List[float] = []
+                        early_tps_samples: List[float] = []
+                        late_tps_samples: List[float] = []
+                        total_est_tokens = 0
+                        total_prompt_tokens = 0
+                        first_ttft_ms: Optional[float] = None
+                        burn_start_ts: Optional[float] = None
+                        t_stage0 = time.perf_counter()
+                        round_idx = 0
+                        eff_ctx_tokens = target_ctx_tokens
+                        eff_max_toks = max_toks
+
+                        try:
+                            async with httpx.AsyncClient(proxy=cur_proxy, trust_env=False, timeout=timeout_cfg) as client:
+                                while True:
+                                    round_idx += 1
+                                    if context_builder_fn and eff_ctx_tokens > 0:
+                                        cur_msgs = context_builder_fn(eff_ctx_tokens, f"R{round_idx}-{uuid.uuid4().hex[:6]}")
+                                    else:
+                                        cur_msgs = messages
+
+                                    req_body = _prepare_bench_req_body(
+                                        ep,
+                                        cur_msgs,
+                                        eff_max_toks,
+                                        temp,
+                                        ollama_num_ctx=ollama_ctx,
+                                        force_sustained_decode=(sustained_duration_s > 0),
+                                    )
+                                    t_req0 = time.perf_counter()
+                                    round_ttft_ms: Optional[float] = None
+                                    round_pieces: List[str] = []
+                                    round_sse_cnt = 0
+                                    round_usage_comp = 0
+                                    round_usage_prompt = 0
+                                    last_tick_emit = 0.0
+                                    pending_preview = ""
+                                    reached_duration = False
+
+                                    async def _consume_resp(resp_obj: httpx.Response):
+                                        nonlocal round_ttft_ms, first_ttft_ms, burn_start_ts, round_sse_cnt
+                                        nonlocal round_usage_comp, round_usage_prompt, last_tick_emit, pending_preview, reached_duration
+                                        ct_hdr = (resp_obj.headers.get("content-type") or "").lower()
+                                        if "text/event-stream" not in ct_hdr and "stream" not in ct_hdr:
+                                            raw_b = await resp_obj.aread()
+                                            cj = json.loads(raw_b.decode("utf-8", errors="ignore"))
+                                            if isinstance(cj.get("usage"), dict):
+                                                round_usage_comp = int(cj["usage"].get("completion_tokens") or 0)
+                                                round_usage_prompt = int(cj["usage"].get("prompt_tokens") or 0)
+                                            msg_o = ((cj.get("choices") or [{}])[0].get("message") or {})
+                                            piece = str(msg_o.get("content") or "") + str(msg_o.get("reasoning_content") or "")
+                                            if piece:
+                                                now_t = time.perf_counter()
+                                                round_ttft_ms = round((now_t - t_req0) * 1000.0, 1)
+                                                if first_ttft_ms is None:
+                                                    first_ttft_ms = round_ttft_ms
+                                                if burn_start_ts is None:
+                                                    burn_start_ts = now_t
+                                                round_pieces.append(piece)
+                                                all_pieces.append(piece)
+                                                tok_times.append(now_t)
+                                                round_sse_cnt += 1
+                                                est_1 = round_usage_comp or _estimate_mixed_tokens(piece, 1)
+                                                tps_1 = round((total_est_tokens + est_1) / max(0.05, now_t - t_stage0), 1)
+                                                await q.put({
+                                                    "ok": True,
+                                                    "type": "token_tick",
+                                                    "stage": stage_key,
+                                                    "percent": pct_end - 2,
+                                                    "ttft_ms": first_ttft_ms,
+                                                    "tokens": total_est_tokens + est_1,
+                                                    "live_tps": tps_1,
+                                                    "avg_tps": tps_1,
+                                                    "preview_delta": piece[:600],
+                                                    "telemetry": live_hw,
+                                                })
+                                            return
+
+                                        async for raw_ln in resp_obj.aiter_lines():
+                                            now_chk = time.perf_counter()
+                                            if sustained_duration_s > 0 and burn_start_ts is not None and (now_chk - burn_start_ts) >= sustained_duration_s:
+                                                reached_duration = True
+                                                break
+                                            ln = raw_ln.strip()
+                                            if not ln or not ln.startswith("data:"):
+                                                continue
+                                            dat = ln[5:].lstrip()
+                                            if dat == "[DONE]":
+                                                break
+                                            try:
+                                                cj = json.loads(dat)
+                                            except Exception:
+                                                continue
+                                            if isinstance(cj.get("usage"), dict):
+                                                round_usage_comp = int(cj["usage"].get("completion_tokens") or round_usage_comp or 0)
+                                                round_usage_prompt = int(cj["usage"].get("prompt_tokens") or round_usage_prompt or 0)
+                                            ch_arr = cj.get("choices") or []
+                                            dlt = (ch_arr[0].get("delta") or ch_arr[0].get("message") or {}) if ch_arr and isinstance(ch_arr[0], dict) else {}
+                                            piece = (dlt.get("content") or "") + (dlt.get("reasoning_content") or dlt.get("reasoning") or "")
+                                            if piece:
+                                                now_t = time.perf_counter()
+                                                if round_ttft_ms is None:
+                                                    round_ttft_ms = round((now_t - t_req0) * 1000.0, 1)
+                                                if first_ttft_ms is None:
+                                                    first_ttft_ms = round_ttft_ms
+                                                if burn_start_ts is None:
+                                                    burn_start_ts = now_t
+                                                round_pieces.append(piece)
+                                                all_pieces.append(piece)
+                                                tok_times.append(now_t)
+                                                round_sse_cnt += 1
+                                                pending_preview += piece
+
+                                                if (now_t - last_tick_emit) >= 0.11:
+                                                    last_tick_emit = now_t
+                                                    r_txt = "".join(round_pieces)
+                                                    r_toks = round_usage_comp or _estimate_mixed_tokens(r_txt, round_sse_cnt)
+                                                    cum_toks = total_est_tokens + r_toks
+                                                    decode_elapsed = max(0.03, now_t - burn_start_ts) if burn_start_ts else max(0.05, now_t - t_req0)
+                                                    avg_tps = round(cum_toks / decode_elapsed, 1)
+                                                    win_cut = now_t - 0.65
+                                                    recent_cnt = sum(1 for ts in tok_times if ts >= win_cut)
+                                                    tok_per_ev = r_toks / max(1, round_sse_cnt)
+                                                    live_tps = (
+                                                        round((recent_cnt * tok_per_ev) / min(0.65, max(0.10, decode_elapsed)), 1)
+                                                        if len(tok_times) > 2
+                                                        else avg_tps
+                                                    )
+                                                    if sustained_duration_s > 0:
+                                                        prog_ratio = min(0.99, decode_elapsed / sustained_duration_s)
+                                                        if prog_ratio <= 0.35:
+                                                            early_tps_samples.append(live_tps)
+                                                        elif prog_ratio >= 0.65:
+                                                            late_tps_samples.append(live_tps)
+                                                    else:
+                                                        prog_ratio = min(0.95, cum_toks / max(1, eff_max_toks))
+                                                    cur_pct = int(round(pct_start + (pct_end - pct_start) * prog_ratio))
+                                                    prev_out = pending_preview[-400:] if len(pending_preview) > 400 else pending_preview
+                                                    pending_preview = ""
+                                                    await q.put({
+                                                        "ok": True,
+                                                        "type": "token_tick",
+                                                        "stage": stage_key,
+                                                        "percent": cur_pct,
+                                                        "ttft_ms": first_ttft_ms,
+                                                        "tokens": cum_toks,
+                                                        "round": round_idx,
+                                                        "burn_elapsed_s": round(decode_elapsed, 1) if sustained_duration_s > 0 else None,
+                                                        "burn_target_s": round(sustained_duration_s, 0) if sustained_duration_s > 0 else None,
+                                                        "live_tps": live_tps,
+                                                        "avg_tps": avg_tps,
+                                                        "preview_delta": prev_out,
+                                                        "telemetry": live_hw,
+                                                    })
+                                                if sustained_duration_s > 0 and burn_start_ts is not None and (now_t - burn_start_ts) >= sustained_duration_s:
+                                                    reached_duration = True
+                                                    break
+
+                                    # 发送请求（若遇到严格 32768 总窗口上限或 4096 单次输出上限的在线 API，自动自适应重试）
+                                    retried_compat = False
+                                    while True:
+                                        async with client.stream(
+                                            "POST",
+                                            f"{ep['base_url']}/chat/completions",
+                                            headers=req_headers,
+                                            json=req_body,
+                                        ) as resp:
+                                            if resp.status_code != 200:
+                                                err_b = await resp.aread()
+                                                err_str = err_b.decode("utf-8", errors="ignore")
+                                                err_low = err_str.lower()
+                                                if resp.status_code in (400, 422) and not retried_compat:
+                                                    retried_compat = True
+                                                    req_body.pop("stream_options", None)
+                                                    if any(k in err_low for k in ("context", "length", "tokens", "max_tokens", "range")):
+                                                        if eff_ctx_tokens > 23500 and context_builder_fn:
+                                                            eff_ctx_tokens = 23500
+                                                            cur_msgs = context_builder_fn(eff_ctx_tokens, f"R{round_idx}-fit32k")
+                                                            req_body["messages"] = cur_msgs
+                                                        elif eff_max_toks > 4096:
+                                                            eff_max_toks = 4096
+                                                            req_body["max_tokens"] = eff_max_toks
+                                                    continue
+                                                last_error = f"HTTP {resp.status_code}: {err_str[:220]}"
+                                                break
+                                            await _consume_resp(resp)
+                                            last_error = ""
+                                            break
+
+                                    if last_error:
+                                        break
+
+                                    r_full = "".join(round_pieces)
+                                    r_final_toks = round_usage_comp or _estimate_mixed_tokens(r_full, round_sse_cnt)
+                                    r_prompt_toks = round_usage_prompt or sum(_estimate_mixed_tokens(m.get("content", "")) for m in cur_msgs)
+                                    total_est_tokens += r_final_toks
+                                    if round_idx == 1:
+                                        total_prompt_tokens = r_prompt_toks
+
+                                    if pending_preview:
+                                        await q.put({
+                                            "ok": True,
+                                            "type": "token_tick",
+                                            "stage": stage_key,
+                                            "percent": pct_end - 1,
+                                            "ttft_ms": first_ttft_ms,
+                                            "tokens": total_est_tokens,
+                                            "preview_delta": pending_preview[-300:],
+                                            "telemetry": live_hw,
+                                        })
+                                        pending_preview = ""
+
+                                    if sustained_duration_s <= 0:
+                                        break
+                                    now_after = time.perf_counter()
+                                    if reached_duration or (burn_start_ts is not None and (now_after - burn_start_ts) >= sustained_duration_s):
+                                        break
+                                    if (now_after - t_stage0) >= (sustained_duration_s + 25.0):
+                                        break
+                                    if r_final_toks <= 0:
+                                        break
+
+                            if all_pieces and total_est_tokens > 0:
+                                t_end = time.perf_counter()
+                                full_txt = "".join(all_pieces)
+                                total_ms = round((t_end - t_stage0) * 1000.0, 1)
+                                eff_ttft_ms = first_ttft_ms if first_ttft_ms is not None else total_ms
+                                decode_span_s = (
+                                    max(0.02, tok_times[-1] - tok_times[0])
+                                    if len(tok_times) >= 3
+                                    else max(0.05, (t_end - burn_start_ts) if burn_start_ts else (t_end - t_stage0))
+                                )
+                                sustained_tps = round((max(1, total_est_tokens - 1) if len(tok_times) >= 3 else total_est_tokens) / decode_span_s, 1)
+                                tok_scale = total_est_tokens / max(1, len(tok_times))
+                                peak_tps = sustained_tps
+                                if len(tok_times) >= 5:
+                                    j = 0
+                                    for i in range(len(tok_times)):
+                                        while tok_times[i] - tok_times[j] > 0.65 and j < i:
+                                            j += 1
+                                        span_w = tok_times[i] - tok_times[j]
+                                        if span_w >= 0.20 and (i - j) >= 2:
+                                            cand_tps = round(((i - j) * tok_scale) / span_w, 1)
+                                            if cand_tps > peak_tps:
+                                                peak_tps = cand_tps
+                                intervals_ms = [
+                                    (tok_times[k] - tok_times[k - 1]) * 1000.0
+                                    for k in range(1, len(tok_times))
+                                    if 0.2 < (tok_times[k] - tok_times[k - 1]) * 1000.0 < 3000.0
+                                ]
+                                if intervals_ms:
+                                    intervals_ms.sort()
+                                    p95_tpot_ms = round(intervals_ms[min(len(intervals_ms) - 1, int(len(intervals_ms) * 0.95))], 1)
+                                else:
+                                    p95_tpot_ms = round(1000.0 / max(1.0, sustained_tps), 1)
+                                prefill_tps = round(total_prompt_tokens / max(0.01, eff_ttft_ms / 1000.0), 1)
+                                stability_pct = 100.0
+                                if early_tps_samples and late_tps_samples:
+                                    e_avg = sum(early_tps_samples) / len(early_tps_samples)
+                                    l_avg = sum(late_tps_samples) / len(late_tps_samples)
+                                    if e_avg > 0.5:
+                                        stability_pct = round(min(100.0, (l_avg / e_avg) * 100.0), 1)
+                                await q.put({
+                                    "_final": True,
+                                    "ok": True,
+                                    "text": full_txt,
+                                    "ttft_ms": eff_ttft_ms,
+                                    "total_ms": total_ms,
+                                    "decode_span_s": round(decode_span_s, 1),
+                                    "rounds": round_idx,
+                                    "output_tokens": total_est_tokens,
+                                    "prompt_tokens": total_prompt_tokens,
+                                    "sustained_tps": sustained_tps,
+                                    "peak_tps": max(peak_tps, sustained_tps),
+                                    "p95_tpot_ms": p95_tpot_ms,
+                                    "prefill_tps": prefill_tps,
+                                    "stability_pct": stability_pct,
+                                })
+                                return
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as ex:
+                            last_error = f"{type(ex).__name__}: {ex}"
+                            continue
+
+                    await q.put({"_final": True, "ok": False, "error": last_error or "模型未返回任何内容"})
+
+                w_task = asyncio.create_task(_worker())
+                try:
+                    while True:
+                        if await request.is_disconnected():
+                            w_task.cancel()
+                            result_out.update({"ok": False, "cancelled": True})
+                            return
+                        try:
+                            item = await asyncio.wait_for(q.get(), timeout=0.25)
+                        except asyncio.TimeoutError:
+                            if w_task.done() and q.empty():
+                                break
+                            continue
+                        if item.get("_final"):
+                            result_out.update(item)
+                            return
+                        yield item
+                finally:
+                    if not w_task.done():
+                        w_task.cancel()
+                if "ok" not in result_out:
+                    result_out.update({"ok": False, "error": "流式测试意外中断"})
+
+            # -------- 阶段 2：首字延迟 --------
+            yield _pack({
+                "ok": True,
+                "type": "stage_start",
+                "stage": "ttft",
+                "stage_index": 2,
+                "total_stages": total_st,
+                "percent": 11,
+                "title": "首字延迟",
+                "engine_ready_ms": engine_ready_ms,
+                "is_local": ep["is_local"],
+                "engine": ep.get("engine", "api"),
+                "telemetry": live_hw,
+            })
+            s2_res: Dict[str, Any] = {}
+            async for ev in _stream_stage_live(
+                "ttft",
+                11,
+                16,
+                [
+                    {"role": "system", "content": "你是敏捷的跑团主持，请直接用两句简短生动的中文回应。"},
+                    {"role": "user", "content": "推开酒馆沉重的橡木门，迎面吹来一阵裹挟着麦芽酒香的暖风。请用两句话描写酒馆老板抬头看来的瞬间。"},
+                ],
+                max_toks=64,
+                result_out=s2_res,
+                temp=0.4,
+                ollama_ctx=bench_ollama_ctx,
+            ):
+                yield _pack(ev)
+            if not s2_res.get("ok"):
+                if not s2_res.get("cancelled"):
+                    yield _pack({"ok": False, "type": "error", "message": f"首字响应测试失败：{s2_res.get('error', '未知错误')}"})
+                return
+            yield _pack({
+                "ok": True,
+                "type": "stage_done",
+                "stage": "ttft",
+                "percent": 16,
+                "metrics": {
+                    "short_ttft_ms": s2_res["ttft_ms"],
+                    "engine_ready_ms": engine_ready_ms,
+                    "burst_tps": s2_res["sustained_tps"],
+                },
+                "telemetry": live_hw,
+                "summary": f"{s2_res['ttft_ms']} ms · {s2_res['sustained_tps']} tok/s",
+            })
+
+            long_ttft_ms = s2_res["ttft_ms"]
+            prefill_tps = s2_res["prefill_tps"]
+            needle_hit = True
+            protocol_score = 100
+            protocol_detail = ""
+            s3_res: Dict[str, Any] = {}
+
+            # -------- 阶段 3：持续吐字 --------
+            if is_full:
+                target_32k_toks = target_ctx_k * 1000
+                dur_disp = f"{int(burn_duration_s)}s"
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_start",
+                    "stage": "throughput",
+                    "stage_index": 3,
+                    "total_stages": total_st,
+                    "percent": 17,
+                    "title": f"持续吐字 ({target_ctx_k}K · {single_max_tokens} · {dur_disp})",
+                    "telemetry": live_hw,
+                })
+
+                def _build_burn_msgs(ctx_toks: int, nonce_tag: str) -> List[Dict[str, str]]:
+                    lore_32k = _build_trpg_32k_context_text(ctx_toks, nonce=f"BURN60S-{nonce_tag}")
+                    sys_p = (
+                        "你是硬核沉浸式桌面角色扮演游戏主持（DM）。以下为当前战役完整的 32K 世界书与前情历史档案。\n"
+                        "请严格基于档案细节，连续撰写一部超长篇、高密度细节的跑团战役实况推演纪实（目标长度 6000~8192 Tokens，按『第一幕』至『第十二幕』逐幕深入展开，包含环境光影、战术动作、NPC 对白、心理博弈与检定细节，严禁提前总结收尾或省略跳段）：\n\n"
+                        + lore_32k
+                    )
+                    usr_p = (
+                        "现在暴雨夜警报已经拉响！先遣调查员小队正携带银壳怀表从第 17 扇区高压蒸汽阀门站突围前往旧钟楼地下涵洞。"
+                        "请立即开始超长篇逐幕连载推演，尽可能详尽地持续输出完整剧情！"
+                    )
+                    return [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}]
+
+                async for ev in _stream_stage_live(
+                    "throughput",
+                    17,
+                    78,
+                    [],
+                    max_toks=single_max_tokens,
+                    result_out=s3_res,
+                    temp=0.68,
+                    ollama_ctx=bench_ollama_ctx,
+                    sustained_duration_s=burn_duration_s,
+                    context_builder_fn=_build_burn_msgs,
+                    target_ctx_tokens=target_32k_toks,
+                ):
+                    yield _pack(ev)
+                if not s3_res.get("ok"):
+                    if not s3_res.get("cancelled"):
+                        yield _pack({"ok": False, "type": "error", "message": f"长时间满载吐字压测失败：{s3_res.get('error', '未知错误')}"})
+                    return
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_done",
+                    "stage": "throughput",
+                    "percent": 78,
+                    "metrics": {
+                        "sustained_tps": s3_res["sustained_tps"],
+                        "peak_tps": s3_res["peak_tps"],
+                        "p95_tpot_ms": s3_res["p95_tpot_ms"],
+                        "output_tokens": s3_res["output_tokens"],
+                        "decode_span_s": s3_res.get("decode_span_s", burn_duration_s),
+                        "stability_pct": s3_res.get("stability_pct", 100.0),
+                    },
+                    "telemetry": live_hw,
+                    "summary": (
+                        f"{s3_res['sustained_tps']} tok/s · 峰值 {s3_res['peak_tps']} · "
+                        f"P95 {s3_res['p95_tpot_ms']}ms · 稳定度 {s3_res.get('stability_pct', 100)}%"
+                    ),
+                })
+
+                # -------- 阶段 4：长文预填 --------
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_start",
+                    "stage": "prefill",
+                    "stage_index": 4,
+                    "total_stages": total_st,
+                    "percent": 79,
+                    "title": f"长文预填 ({target_ctx_k}K)",
+                    "telemetry": live_hw,
+                })
+
+                def _build_prefill_msgs(ctx_toks: int, nonce_tag: str) -> List[Dict[str, str]]:
+                    lore_32k = _build_trpg_32k_context_text(ctx_toks, nonce=f"PREFILL-{nonce_tag}")
+                    return [
+                        {"role": "system", "content": "请根据给定的超长世界书设定准确回答调查员的问题，简明扼要（不超过60字）。\n\n" + lore_32k},
+                        {"role": "user", "content": "请查阅上述世界书卷宗 #017 的记载：雾港第 17 扇区的加密无线电报中继台工作频段是多少 MHz？接头暗号是什么？"},
+                    ]
+
+                s4_res: Dict[str, Any] = {}
+                async for ev in _stream_stage_live(
+                    "prefill",
+                    79,
+                    90,
+                    [],
+                    max_toks=96,
+                    result_out=s4_res,
+                    temp=0.2,
+                    ollama_ctx=bench_ollama_ctx,
+                    context_builder_fn=_build_prefill_msgs,
+                    target_ctx_tokens=target_32k_toks,
+                ):
+                    yield _pack(ev)
+                if not s4_res.get("ok"):
+                    if not s4_res.get("cancelled"):
+                        yield _pack({"ok": False, "type": "error", "message": f"{target_ctx_k}K 长上下文压测失败：{s4_res.get('error', '未知错误')}"})
+                    return
+                long_ttft_ms = s4_res["ttft_ms"]
+                prefill_tps = s4_res["prefill_tps"]
+                needle_hit = ("157.5" in s4_res["text"]) and ("白鸦-17" in s4_res["text"] or "白鸦" in s4_res["text"] or "17" in s4_res["text"])
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_done",
+                    "stage": "prefill",
+                    "percent": 90,
+                    "metrics": {
+                        "long_ttft_ms": long_ttft_ms,
+                        "prefill_tps": prefill_tps,
+                        "prompt_tokens": s4_res["prompt_tokens"],
+                        "needle_hit": needle_hit,
+                    },
+                    "telemetry": live_hw,
+                    "summary": f"{prefill_tps} tok/s · 首字 {long_ttft_ms}ms · {'命中' if needle_hit else '未中'}",
+                })
+            else:
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_start",
+                    "stage": "throughput",
+                    "stage_index": 3,
+                    "total_stages": total_st,
+                    "percent": 28,
+                    "title": "持续吐字",
+                    "telemetry": live_hw,
+                })
+                async for ev in _stream_stage_live(
+                    "throughput",
+                    28,
+                    58,
+                    [
+                        {"role": "system", "content": "你是硬核沉浸式桌面角色扮演游戏主持（DM）。请直接输出细腻的雨夜潜行与近身危机场景描写，包含光影、雨声、呼吸与动作细节，约 280~360 字。"},
+                        {"role": "user", "content": "暴雨冲刷着锈蚀的港口集装箱迷宫，探照灯的光柱每隔四秒扫过头顶铁桥。我贴着冰冷的钢板屏住呼吸，听见拐角处传来两双战术靴踩碎积水的脚步声。请继续推演这一幕。"},
+                    ],
+                    max_toks=280,
+                    result_out=s3_res,
+                    temp=0.65,
+                    ollama_ctx=bench_ollama_ctx,
+                ):
+                    yield _pack(ev)
+                if not s3_res.get("ok"):
+                    if not s3_res.get("cancelled"):
+                        yield _pack({"ok": False, "type": "error", "message": f"沉浸叙事持续吐字压测失败：{s3_res.get('error', '未知错误')}"})
+                    return
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_done",
+                    "stage": "throughput",
+                    "percent": 58,
+                    "metrics": {
+                        "sustained_tps": s3_res["sustained_tps"],
+                        "peak_tps": s3_res["peak_tps"],
+                        "p95_tpot_ms": s3_res["p95_tpot_ms"],
+                        "output_tokens": s3_res["output_tokens"],
+                    },
+                    "telemetry": live_hw,
+                    "summary": f"{s3_res['sustained_tps']} tok/s · 峰值 {s3_res['peak_tps']} · P95 {s3_res['p95_tpot_ms']}ms",
+                })
+
+                # -------- 快速测试 阶段 4：~3.2K 长文预填 --------
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_start",
+                    "stage": "prefill",
+                    "stage_index": 4,
+                    "total_stages": total_st,
+                    "percent": 60,
+                    "title": "长文预填 (~3.2K)",
+                    "telemetry": live_hw,
+                })
+                lore_blocks_q = []
+                for sec_i in range(1, 29):
+                    lore_blocks_q.append(
+                        f"【世界书卷宗 #{sec_i:02d} · 雾港区域档案】第 {sec_i} 扇区由灰潮商会与守夜人卫队共同巡逻，"
+                        f"主要地标包含旧钟楼第 {sec_i * 3} 号地下水道、蒸汽阀门站 B-{sec_i} 与加密电报中继台（频段 {140 + sec_i}.5 MHz）。"
+                        f"当调查员携带银制怀表或暗号『白鸦-{sec_i}』进入时，守卫警戒度下降 15 点，但黑曜石教团暗哨会在雨夜记录行踪。"
+                    )
+                long_ctx_q = "\n".join(lore_blocks_q)
+                s4_res_q: Dict[str, Any] = {}
+                async for ev in _stream_stage_live(
+                    "prefill",
+                    60,
+                    82,
+                    [
+                        {"role": "system", "content": "请根据给定的长篇世界书设定准确回答调查员的问题，简明扼要（不超过50字）。\n\n" + long_ctx_q},
+                        {"role": "user", "content": "根据上述世界书卷宗 #17 的记载，第 17 扇区的加密电报中继台频段是多少 MHz？暗号是什么？"},
+                    ],
+                    max_toks=64,
+                    result_out=s4_res_q,
+                    temp=0.2,
+                    ollama_ctx=bench_ollama_ctx,
+                ):
+                    yield _pack(ev)
+                if not s4_res_q.get("ok"):
+                    if not s4_res_q.get("cancelled"):
+                        yield _pack({"ok": False, "type": "error", "message": f"长上下文世界书消化压测失败：{s4_res_q.get('error', '未知错误')}"})
+                    return
+                long_ttft_ms = s4_res_q["ttft_ms"]
+                prefill_tps = s4_res_q["prefill_tps"]
+                needle_hit = ("157.5" in s4_res_q["text"]) and ("白鸦-17" in s4_res_q["text"] or "17" in s4_res_q["text"])
+                yield _pack({
+                    "ok": True,
+                    "type": "stage_done",
+                    "stage": "prefill",
+                    "percent": 82,
+                    "metrics": {
+                        "long_ttft_ms": long_ttft_ms,
+                        "prefill_tps": prefill_tps,
+                        "prompt_tokens": s4_res_q["prompt_tokens"],
+                        "needle_hit": needle_hit,
+                    },
+                    "telemetry": live_hw,
+                    "summary": f"{prefill_tps} tok/s · 首字 {long_ttft_ms}ms · {'命中' if needle_hit else '未中'}",
+                })
+
+            # -------- 阶段 5：协议检定 --------
+            yield _pack({
+                "ok": True,
+                "type": "stage_start",
+                "stage": "protocol",
+                "stage_index": 5,
+                "total_stages": total_st,
+                "percent": 91 if is_full else 84,
+                "title": "协议检定",
+                "telemetry": live_hw,
+            })
+            s5_res: Dict[str, Any] = {}
+            proto_sys = (
+                "你是严格的跑团主持人(DM)。请严格按以下顺序输出：\n"
+                "1. 剧情正文（约80~120字）：根据 D100 规则（掷骰结果 <= 技能值为成功，> 技能值为失败）推演结果；\n"
+                "2. 状态栏：用 <status>生命: xx/100 | 警戒: xx%</status> 包裹；\n"
+                "3. 行动选项：必须在全文最后紧跟 3 个编号选项（1. ... 2. ... 3. ...），选项后不得再有任何文字。"
+            )
+            proto_user = "【系统检定结果：玩家尝试撬开典狱长保险柜，开锁技能 35，本次 D100 掷出 89（89 > 35，检定失败！）】请立即推演这一幕。"
+            async for ev in _stream_stage_live(
+                "protocol",
+                91 if is_full else 84,
+                98,
+                [
+                    {"role": "system", "content": proto_sys},
+                    {"role": "user", "content": proto_user},
+                ],
+                max_toks=240,
+                result_out=s5_res,
+                temp=0.3,
+                ollama_ctx=bench_ollama_ctx,
+            ):
+                yield _pack(ev)
+            if not s5_res.get("ok"):
+                if not s5_res.get("cancelled"):
+                    yield _pack({"ok": False, "type": "error", "message": f"跑团协议检定失败：{s5_res.get('error', '未知错误')}"})
+                return
+
+            p_txt = strip_thinking_blocks(s5_res["text"]).strip()
+            score_pts = 0
+            checks_passed = []
+            fail_keywords = ("失败", "断裂", "卡死", "警报", "刺耳", "声响", "未能", "没能", "滑脱", "崩断", "暴露", "脚步")
+            blind_success = ("成功打开", "顺利打开", "咔哒一声开了", "柜门缓缓打开")
+            dice_ok = any(k in p_txt for k in fail_keywords) and not any(bs in p_txt for bs in blind_success)
+            if dice_ok:
+                score_pts += 35
+                checks_passed.append("D100失败判定准确")
+            if needle_hit:
+                score_pts += 15
+                checks_passed.append("长文记忆精准")
+            m_st = re.search(r"<status>([\s\S]+?)</status>", p_txt, flags=re.I)
+            if m_st and len(m_st.group(1).strip()) >= 4:
+                score_pts += 25
+                checks_passed.append("<status>闭合规范")
+            tail_part = p_txt[m_st.end():] if m_st else p_txt
+            has_123 = all(re.search(rf"(?:^|\n)\s*{n}[.、）)]\s*\S+", tail_part) for n in (1, 2, 3))
+            if has_123:
+                score_pts += 25
+                checks_passed.append("末尾行动选项完整")
+
+            protocol_score = score_pts
+            protocol_detail = " · ".join(checks_passed) if checks_passed else "部分漏项"
+            yield _pack({
+                "ok": True,
+                "type": "stage_done",
+                "stage": "protocol",
+                "percent": 98,
+                "metrics": {
+                    "protocol_score": protocol_score,
+                    "checks": checks_passed,
+                },
+                "telemetry": live_hw,
+                "summary": f"{protocol_score}/100 ({protocol_detail})",
+            })
+
+            # -------- 汇总计算综合评分与建议参数 --------
+            live_hw = await asyncio.to_thread(_collect_hardware_telemetry_sync)
+            tps_val = s3_res["sustained_tps"]
+            short_ttft = s2_res["ttft_ms"]
+            stability_pct = s3_res.get("stability_pct", 100.0)
+
+            tps_score = min(100.0, (tps_val / 75.0) * 100.0) if tps_val <= 75 else 100.0
+            if tps_val >= 40:
+                tps_score = max(tps_score, 85.0 + min(15.0, (tps_val - 40.0) / 4.0))
+            elif tps_val >= 20:
+                tps_score = 68.0 + ((tps_val - 20.0) / 20.0) * 17.0
+            else:
+                tps_score = max(15.0, (tps_val / 20.0) * 68.0)
+
+            ttft_score = 100.0 if short_ttft <= 450 else max(25.0, 100.0 - ((short_ttft - 450.0) / 45.0))
+            prefill_score = min(100.0, 55.0 + (prefill_tps / 2500.0) * 45.0) if prefill_tps > 0 else 70.0
+            hw_score = min(100.0, (hw_bench["cpu_score"] / 2400.0) * 50.0 + (min(32.0, live_hw["gpu"]["vram_total_gib"]) / 24.0) * 50.0)
+
+            overall_score = int(round(
+                tps_score * 0.40
+                + ttft_score * 0.18
+                + prefill_score * 0.17
+                + protocol_score * 0.15
+                + hw_score * 0.10
+            ))
+            overall_score = max(10, min(100, overall_score))
+
+            if overall_score >= 92:
+                grade, grade_label = "S+", ""
+            elif overall_score >= 83:
+                grade, grade_label = "S", ""
+            elif overall_score >= 72:
+                grade, grade_label = "A", ""
+            elif overall_score >= 58:
+                grade, grade_label = "B", ""
+            else:
+                grade, grade_label = "C", ""
+
+            tips: List[str] = []
+            vram_gib = live_hw["gpu"].get("vram_total_gib") or 0.0
+            if ep["is_local"] and hw_bench["disk_read_mbps"] > 0 and hw_bench["disk_read_mbps"] < 350:
+                tips.append(f"磁盘读取 {hw_bench['disk_read_mbps']} MB/s 偏慢，建议移至固态硬盘")
+            if is_full and stability_pct < 80.0:
+                tips.append(f"长压后半程速率降至 {stability_pct}%")
+
+            cur_global = {
+                "context_mode": str(settings.get("context_mode") or "tokens"),
+                "max_context_k": safe_int(settings.get("max_context_k"), 96),
+                "context": safe_int(settings.get("context", settings.get("max_context_turns", 64)), 64),
+                "max_tokens": safe_int(settings.get("max_tokens"), 8192),
+                "thinking_budget": safe_int(settings.get("thinking_budget"), 1024),
+                "keep_recent_messages": safe_int(settings.get("keep_recent_messages"), 6),
+                "worldbook_scan_depth": safe_int(settings.get("worldbook_scan_depth"), 5),
+                "auto_summarize": bool(settings.get("auto_summarize", True)),
+            }
+
+            ram_gib = live_hw["ram"].get("total_gib") or 16.0
+            is_fast_model = tps_val >= 38 and (not is_full or prefill_tps >= 900 or not ep["is_local"])
+            is_mid_model = tps_val >= 18
+
+            rec_profile_title = ""
+            recommended_global: Optional[Dict[str, Any]] = None
+            if ep["is_local"]:
+                if (vram_gib >= 26 or ram_gib >= 48) and is_fast_model:
+                    rec_ctx_mode, rec_ctx_k, rec_turns, rec_keep, rec_wb_depth = "tokens", 96, 96, 10, 6
+                    rec_profile_title = "96K"
+                elif vram_gib >= 18 or (vram_gib >= 14 and is_mid_model):
+                    rec_ctx_mode, rec_ctx_k, rec_turns, rec_keep, rec_wb_depth = "tokens", 64, 48, 8, 5
+                    rec_profile_title = "64K"
+                elif vram_gib >= 10 or is_mid_model:
+                    rec_ctx_mode, rec_ctx_k, rec_turns, rec_keep, rec_wb_depth = "turns", 32, 20, 6, 4
+                    rec_profile_title = "32K"
+                else:
+                    rec_ctx_mode, rec_ctx_k, rec_turns, rec_keep, rec_wb_depth = "turns", 24, 12, 4, 3
+                    rec_profile_title = "24K"
+
+                if tps_val >= 50:
+                    rec_max_tokens, rec_think = 8192, 1280
+                elif tps_val >= 25:
+                    rec_max_tokens, rec_think = 8192, 1024
+                elif tps_val >= 15:
+                    rec_max_tokens, rec_think = 6144, 512
+                else:
+                    rec_max_tokens, rec_think = 4096, 0
+
+                recommended_global = {
+                    "context_mode": rec_ctx_mode,
+                    "max_context_k": rec_ctx_k,
+                    "context": rec_turns,
+                    "max_context_turns": rec_turns,
+                    "max_tokens": rec_max_tokens,
+                    "thinking_budget": rec_think,
+                    "keep_recent_messages": rec_keep,
+                    "worldbook_scan_depth": rec_wb_depth,
+                    "auto_summarize": True,
+                }
+
+            final_report = {
+                "model": target_model,
+                "is_local": ep["is_local"],
+                "engine": ep.get("engine", "api"),
+                "mode": "full" if is_full else "quick",
+                "context_k": target_ctx_k if is_full else 4,
+                "single_max_tokens": single_max_tokens if is_full else 280,
+                "burn_duration_s": s3_res.get("decode_span_s", burn_duration_s) if is_full else s3_res.get("decode_span_s", 0),
+                "total_output_tokens": s3_res.get("output_tokens", 0),
+                "stability_pct": stability_pct,
+                "overall_score": overall_score,
+                "grade": grade,
+                "grade_label": grade_label,
+                "short_ttft_ms": short_ttft,
+                "long_ttft_ms": long_ttft_ms,
+                "engine_ready_ms": engine_ready_ms,
+                "sustained_tps": tps_val,
+                "peak_tps": s3_res["peak_tps"],
+                "p95_tpot_ms": s3_res["p95_tpot_ms"],
+                "prefill_tps": prefill_tps,
+                "protocol_score": protocol_score,
+                "protocol_detail": protocol_detail,
+                "cpu_score": hw_bench["cpu_score"],
+                "mem_bw_gbps": hw_bench["mem_bw_gbps"],
+                "disk_read_mbps": hw_bench["disk_read_mbps"],
+                "tips": tips,
+                "rec_profile_title": rec_profile_title,
+                "current_global_params": cur_global,
+                "recommended_global_params": recommended_global,
+            }
+
+            yield _pack({
+                "ok": True,
+                "type": "benchmark_done",
+                "percent": 100,
+                "report": final_report,
+                "telemetry": live_hw,
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception as bench_ex:
+            yield _pack({
+                "ok": False,
+                "type": "error",
+                "message": f"性能测试执行异常：{type(bench_ex).__name__}: {bench_ex}",
+            })
+        finally:
+            stop_hw_flag = True
+            hw_poller_task.cancel()
+
+    return StreamingResponse(
+        _bench_gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/system/benchmark/parallel_stream")
+async def api_system_benchmark_parallel_stream(req: ParallelBenchmarkRequest, request: Request):
+    """非默认底部高级压测：1~16 路并行长时间满载压力测试（默认 32K 上下文 + 单次吐字 8192 + 持续 60 秒）"""
+    username = get_current_user(request)
+    settings = load_user_settings(username)
+    target_model = (req.model or "").strip() or str(settings.get("model") or "").strip()
+    parallel_n = max(1, min(16, safe_int(req.parallel, 4)))
+    ctx_k = max(8, min(96, safe_int(req.context_k, 32)))
+    max_toks = max(512, min(16384, safe_int(req.max_tokens, 8192)))
+    duration_s = max(5.0, min(300.0, float(req.duration_s or 60.0)))
+
+    async def _par_gen():
+        def _pack(obj: Dict[str, Any]) -> bytes:
+            return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
+        if not target_model:
+            yield _pack({"ok": False, "type": "error", "message": "请先在上方选择要压测的模型！"})
+            return
+
+        live_hw: Dict[str, Any] = await asyncio.to_thread(_collect_hardware_telemetry_sync)
+        stop_hw = False
+        peak_vram_gib = float(live_hw.get("gpu", {}).get("vram_used_gib") or 0.0)
+        peak_gpu_power_w = float(live_hw.get("gpu", {}).get("power_w") or 0.0)
+        peak_gpu_temp_c = int(live_hw.get("gpu", {}).get("temp_c") or 0)
+
+        async def _hw_loop():
+            nonlocal live_hw, peak_vram_gib, peak_gpu_power_w, peak_gpu_temp_c
+            while not stop_hw:
+                await asyncio.sleep(0.45)
+                if stop_hw:
+                    break
+                try:
+                    live_hw = await asyncio.to_thread(_collect_hardware_telemetry_sync)
+                    g = live_hw.get("gpu") or {}
+                    peak_vram_gib = max(peak_vram_gib, float(g.get("vram_used_gib") or 0.0))
+                    peak_gpu_power_w = max(peak_gpu_power_w, float(g.get("power_w") or 0.0))
+                    peak_gpu_temp_c = max(peak_gpu_temp_c, int(g.get("temp_c") or 0))
+                except Exception:
+                    pass
+
+        hw_task = asyncio.create_task(_hw_loop())
+        lane_tasks: List[asyncio.Task] = []
+        try:
+            ep = resolve_model_endpoint(target_model, settings)
+            if not ep["is_local"] and os.environ.get("TRPG_ALLOW_API_STRESS_TEST") != "1":
+                yield _pack({
+                    "ok": False,
+                    "type": "error",
+                    "message": "已暂时禁用在线 API 模型运行并行长时间高压测试（防止消耗大量 Token 额度），API 模型仅支持运行上方「快速测试」！",
+                })
+                return
+            engine_slots_info = f"{parallel_n} 路异步并发流"
+            if ep["is_local"]:
+                eng_q: asyncio.Queue = asyncio.Queue()
+
+                async def _ecb(msg: str) -> None:
+                    await eng_q.put(msg)
+
+                t_e0 = time.perf_counter()
+                par_slot_ctx = ctx_k * 1024 + max_toks + 1024
+                etask = asyncio.create_task(
+                    ensure_local_engine_ready(
+                        target_model,
+                        status_callback=_ecb,
+                        parallel_slots=parallel_n,
+                        slot_ctx_tokens=par_slot_ctx,
+                    )
+                )
+                last_m = f"准备引擎 ({parallel_n} 路)..."
+                yield _pack({"ok": True, "type": "status", "percent": 4, "message": last_m, "telemetry": live_hw})
+                while not etask.done():
+                    try:
+                        m_s = await asyncio.wait_for(eng_q.get(), timeout=0.6)
+                        if m_s:
+                            last_m = m_s
+                    except asyncio.TimeoutError:
+                        pass
+                    yield _pack({
+                        "ok": True,
+                        "type": "status",
+                        "percent": 6,
+                        "message": f"{last_m} ({time.perf_counter() - t_e0:.1f}s)",
+                        "telemetry": live_hw,
+                    })
+                l_err = await etask
+                ep = resolve_model_endpoint(target_model, settings)
+                if l_err:
+                    yield _pack({"ok": False, "type": "error", "message": f"本地引擎启动失败：{l_err}"})
+                    return
+                if ep.get("engine") == "strata":
+                    try:
+                        root_u = ep["base_url"][:-3] if ep["base_url"].endswith("/v1") else ep["base_url"]
+                        async with httpx.AsyncClient(trust_env=False, timeout=2.0) as cs:
+                            rs = await cs.get(f"{root_u}/v1/status")
+                            if rs.status_code == 200:
+                                conc = rs.json().get("concurrency") or {}
+                                srv_sl = safe_int(conc.get("serving"), 1)
+                                engine_slots_info = (
+                                    f"Strata 硬件并行槽位 {srv_sl} 个"
+                                    + (f"（其余 {parallel_n - srv_sl} 路引擎内排队轮转）" if parallel_n > srv_sl else "（全量同时解码）")
+                                )
+                    except Exception:
+                        engine_slots_info = f"Strata 本地并发 ({parallel_n} 路)"
+                else:
+                    engine_slots_info = f"{ep.get('engine', 'local')} 连续批处理 ({parallel_n} 路)"
+            elif not ep.get("base_url") or (not ep.get("api_key") and not ep.get("is_local")):
+                yield _pack({"ok": False, "type": "error", "message": f"模型「{target_model}」尚未配置有效的 API 地址或密钥！"})
+                return
+
+            yield _pack({
+                "ok": True,
+                "type": "parallel_init",
+                "parallel": parallel_n,
+                "context_k": ctx_k,
+                "max_tokens": max_toks,
+                "duration_s": duration_s,
+                "engine_slots_info": engine_slots_info,
+                "telemetry": live_hw,
+            })
+
+            req_headers = ep.get("headers") or {
+                "Authorization": f"Bearer {ep['api_key']}",
+                "Content-Type": "application/json",
+            }
+            proxy_cands = [ep["proxy"], None] if ep.get("proxy") else [None]
+            chosen_proxy = proxy_cands[0]
+            # 若配置了本机代理但端口未启动，毫秒级探测自动切回直连，避免 16 路同时撞死端口
+            if chosen_proxy and _is_loopback_only_url(chosen_proxy):
+                try:
+                    up = urlparse(chosen_proxy if "://" in chosen_proxy else f"http://{chosen_proxy}")
+                    if up.port:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as psock:
+                            psock.settimeout(0.15)
+                            if psock.connect_ex((up.hostname or "127.0.0.1", int(up.port))) != 0:
+                                chosen_proxy = None
+                except Exception:
+                    chosen_proxy = None
+
+            base_32k_core = await asyncio.to_thread(_build_trpg_32k_context_text, ctx_k * 1000, "PAR-CORE")
+            lanes_state: List[Dict[str, Any]] = [
+                {
+                    "id": idx + 1,
+                    "state": "预填",
+                    "rounds": 0,
+                    "tokens": 0,
+                    "ttft_ms": None,
+                    "tok_events": [],
+                    "decode_s": 0.0,
+                    "tail": "",
+                    "errors": 0,
+                    "last_err": "",
+                }
+                for idx in range(parallel_n)
+            ]
+
+            t_par0 = time.perf_counter()
+            burn_t0: Optional[float] = None
+            burn_base_toks: List[int] = [0] * parallel_n
+            stop_burn_ev = asyncio.Event()
+            limits = httpx.Limits(max_connections=max(36, parallel_n * 2 + 4), max_keepalive_connections=max(20, parallel_n + 2))
+            timeout_cfg = httpx.Timeout(max(360.0, duration_s + 240.0), connect=25.0)
+
+            async with httpx.AsyncClient(proxy=chosen_proxy, trust_env=False, limits=limits, timeout=timeout_cfg) as shared_client:
+
+                async def _lane_runner(lane_idx: int):
+                    st = lanes_state[lane_idx]
+                    lane_no = lane_idx + 1
+                    cur_ctx_str = base_32k_core
+                    cur_max_toks = max_toks
+                    round_no = 0
+                    while not stop_burn_ev.is_set() and (burn_t0 is None or (time.perf_counter() - burn_t0) < duration_s):
+                        round_no += 1
+                        st["rounds"] = round_no
+                        st["state"] = "预填"
+                        lane_prefix = f"[并行压测通道 #{lane_no:02d} · 轮次 {round_no} · 标识 {uuid.uuid4().hex[:6]}]\n"
+                        msgs = [
+                            {
+                                "role": "system",
+                                "content": (
+                                    lane_prefix
+                                    + "你是沉浸式跑团主持(DM)。请基于以下 32K 世界书档案，持续详尽推演第 "
+                                    + str(lane_no)
+                                    + " 小队的突围长篇剧情（目标 8192 Tokens，切勿提前结束）：\n\n"
+                                    + cur_ctx_str
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": f"第 {lane_no} 特勤调查小队已抵达雾港第 {(lane_no % 24) + 1} 扇区地下蒸汽管网，请立即开始超长篇连续实况推演！",
+                            },
+                        ]
+                        body = _prepare_bench_req_body(
+                            ep,
+                            msgs,
+                            cur_max_toks,
+                            0.68,
+                            ollama_num_ctx=max(40960, ctx_k * 1024 + cur_max_toks + 1024),
+                            force_sustained_decode=True,
+                        )
+                        t_r0 = time.perf_counter()
+                        r_first_t: Optional[float] = None
+                        r_last_t: Optional[float] = None
+                        r_pieces: List[str] = []
+                        r_sse = 0
+                        r_usage_toks = 0
+                        base_toks_before = st["tokens"]
+                        base_decode_s = st["decode_s"]
+
+                        try:
+                            async with shared_client.stream(
+                                "POST",
+                                f"{ep['base_url']}/chat/completions",
+                                headers=req_headers,
+                                json=body,
+                            ) as resp:
+                                if resp.status_code != 200:
+                                    eb = (await resp.aread()).decode("utf-8", errors="ignore")
+                                    if resp.status_code in (400, 422):
+                                        body.pop("stream_options", None)
+                                        if any(w in eb.lower() for w in ("context", "length", "tokens", "max_tokens")):
+                                            cur_ctx_str = _build_trpg_32k_context_text(23500, f"FIT-{lane_no}")
+                                            cur_max_toks = min(cur_max_toks, 4096) if "max_tokens" in eb.lower() else cur_max_toks
+                                            continue
+                                    st["errors"] += 1
+                                    st["last_err"] = f"HTTP {resp.status_code}: {eb[:120]}"
+                                    st["state"] = f"异常({resp.status_code})"
+                                    await asyncio.sleep(1.0)
+                                    continue
+
+                                async for raw_ln in resp.aiter_lines():
+                                    if stop_burn_ev.is_set() or (burn_t0 is not None and (time.perf_counter() - burn_t0) >= duration_s):
+                                        break
+                                    ln = raw_ln.strip()
+                                    if not ln or not ln.startswith("data:"):
+                                        continue
+                                    dat = ln[5:].lstrip()
+                                    if dat == "[DONE]":
+                                        break
+                                    try:
+                                        cj = json.loads(dat)
+                                    except Exception:
+                                        continue
+                                    if isinstance(cj.get("usage"), dict):
+                                        r_usage_toks = int(cj["usage"].get("completion_tokens") or r_usage_toks or 0)
+                                    ch_arr = cj.get("choices") or []
+                                    dlt = (ch_arr[0].get("delta") or ch_arr[0].get("message") or {}) if ch_arr and isinstance(ch_arr[0], dict) else {}
+                                    piece = (dlt.get("content") or "") + (dlt.get("reasoning_content") or dlt.get("reasoning") or "")
+                                    if piece:
+                                        now_t = time.perf_counter()
+                                        if r_first_t is None:
+                                            r_first_t = now_t
+                                            if st["ttft_ms"] is None:
+                                                st["ttft_ms"] = round((now_t - t_r0) * 1000.0, 1)
+                                            st["state"] = "吐字"
+                                        r_last_t = now_t
+                                        r_pieces.append(piece)
+                                        r_sse += 1
+                                        cur_r_txt = "".join(r_pieces)
+                                        r_est = r_usage_toks or _estimate_mixed_tokens(cur_r_txt, r_sse)
+                                        prev_toks = st["tokens"]
+                                        new_toks = max(prev_toks, base_toks_before + r_est)
+                                        delta_toks = max(1, new_toks - prev_toks)
+                                        st["tokens"] = new_toks
+                                        st["decode_s"] = base_decode_s + max(0.02, r_last_t - r_first_t)
+                                        st["tok_events"].append((now_t, delta_toks))
+                                        if len(st["tok_events"]) > 180:
+                                            st["tok_events"] = st["tok_events"][-110:]
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as ex:
+                            if not stop_burn_ev.is_set():
+                                st["errors"] += 1
+                                st["last_err"] = f"{type(ex).__name__}: {ex}"
+                                st["state"] = "重试"
+                                await asyncio.sleep(0.8)
+
+                    if st["tokens"] > 0 and st["errors"] == 0:
+                        st["state"] = "完成"
+
+                for i in range(parallel_n):
+                    lane_tasks.append(asyncio.create_task(_lane_runner(i)))
+
+                peak_agg_tps = 0.0
+                while True:
+                    if await request.is_disconnected():
+                        stop_burn_ev.set()
+                        break
+                    await asyncio.sleep(0.22)
+                    now_t = time.perf_counter()
+                    wall_elapsed = now_t - t_par0
+                    ready_lanes = sum(1 for st in lanes_state if st["ttft_ms"] is not None or st["errors"] > 0)
+                    if burn_t0 is None and (ready_lanes >= parallel_n or (ready_lanes >= 1 and wall_elapsed >= 120.0)):
+                        burn_t0 = now_t
+                        burn_base_toks = [st["tokens"] for st in lanes_state]
+
+                    burn_elapsed = (now_t - burn_t0) if burn_t0 is not None else 0.0
+                    win_s = 1.0
+                    win_cut = now_t - win_s
+
+                    total_toks = 0
+                    agg_live_tps = 0.0
+                    active_decoding = 0
+                    total_errs = 0
+                    ttfts: List[float] = []
+                    lanes_view: List[Dict[str, Any]] = []
+
+                    for idx_l, st in enumerate(lanes_state):
+                        total_toks += st["tokens"]
+                        total_errs += st["errors"]
+                        if st["ttft_ms"] is not None:
+                            ttfts.append(st["ttft_ms"])
+                        win_toks = sum(dt for ts, dt in st["tok_events"] if ts >= win_cut)
+                        live_lane_tps = round(win_toks / win_s, 1) if win_toks > 0 else 0.0
+                        if burn_t0 is not None and burn_elapsed >= 0.4:
+                            avg_lane_tps = round(max(0, st["tokens"] - burn_base_toks[idx_l]) / burn_elapsed, 1)
+                        else:
+                            avg_lane_tps = round(st["tokens"] / max(0.1, wall_elapsed), 1) if st["tokens"] > 0 else 0.0
+                        dec_lane_tps = round(st["tokens"] / max(0.05, st["decode_s"]), 1) if st["tokens"] > 0 and st["decode_s"] > 0 else avg_lane_tps
+                        if live_lane_tps > 0 or st["state"] == "吐字":
+                            active_decoding += 1
+                        agg_live_tps += live_lane_tps
+                        lanes_view.append({
+                            "id": st["id"],
+                            "state": st["state"],
+                            "rounds": st["rounds"],
+                            "tokens": st["tokens"],
+                            "tps": live_lane_tps if live_lane_tps > 0 else avg_lane_tps,
+                            "avg_tps": avg_lane_tps,
+                            "decode_tps": dec_lane_tps,
+                            "ttft_ms": st["ttft_ms"],
+                        })
+
+                    agg_live_tps = round(agg_live_tps, 1)
+                    if burn_t0 is not None:
+                        burn_toks_cur = max(0, total_toks - sum(burn_base_toks))
+                        agg_avg_tps = round(burn_toks_cur / max(0.15, burn_elapsed), 1) if burn_elapsed >= 0.4 else agg_live_tps
+                        if burn_elapsed >= 1.0:
+                            peak_agg_tps = max(peak_agg_tps, agg_live_tps, agg_avg_tps)
+                        pct = min(99, 20 + int(round((burn_elapsed / duration_s) * 80)))
+                    else:
+                        agg_avg_tps = agg_live_tps
+                        pct = min(20, 8 + int(12 * ready_lanes / max(1, parallel_n)))
+
+                    yield _pack({
+                        "ok": True,
+                        "type": "parallel_tick",
+                        "phase": "burn" if burn_t0 is not None else "prefill",
+                        "ready_lanes": ready_lanes,
+                        "prefill_elapsed_s": round(wall_elapsed, 1),
+                        "percent": pct,
+                        "elapsed_s": round(min(duration_s, burn_elapsed), 1),
+                        "duration_s": duration_s,
+                        "parallel": parallel_n,
+                        "active_lanes": active_decoding,
+                        "total_tokens": total_toks,
+                        "agg_live_tps": agg_live_tps,
+                        "agg_avg_tps": agg_avg_tps,
+                        "per_lane_tps": round(agg_avg_tps / max(1, parallel_n), 1),
+                        "peak_agg_tps": round(peak_agg_tps, 1),
+                        "avg_ttft_ms": round(sum(ttfts) / len(ttfts), 1) if ttfts else None,
+                        "max_ttft_ms": round(max(ttfts), 1) if ttfts else None,
+                        "error_count": total_errs,
+                        "peak_vram_gib": round(peak_vram_gib, 2),
+                        "lanes": lanes_view,
+                        "telemetry": live_hw,
+                    })
+
+                    if (burn_t0 is not None and burn_elapsed >= duration_s) or all(t.done() for t in lane_tasks):
+                        stop_burn_ev.set()
+                        break
+
+                for t in lane_tasks:
+                    if not t.done():
+                        t.cancel()
+                if lane_tasks:
+                    await asyncio.gather(*lane_tasks, return_exceptions=True)
+
+            eff_burn_s = (
+                max(0.1, min(duration_s + 2.0, time.perf_counter() - burn_t0))
+                if burn_t0 is not None
+                else max(0.1, min(duration_s + 2.0, time.perf_counter() - t_par0))
+            )
+            total_toks = sum(st["tokens"] for st in lanes_state)
+            burn_toks_final = max(0, total_toks - sum(burn_base_toks)) if burn_t0 is not None else total_toks
+            use_burn_window = burn_t0 is not None and burn_toks_final > 0
+            total_errs = sum(st["errors"] for st in lanes_state)
+            ok_lanes = sum(1 for st in lanes_state if st["tokens"] > 0)
+            ttfts_all = sorted(st["ttft_ms"] for st in lanes_state if st["ttft_ms"] is not None)
+            if total_toks == 0:
+                first_err = next((st["last_err"] for st in lanes_state if st["last_err"]), "所有并发通道均未收到有效输出")
+                yield _pack({"ok": False, "type": "error", "message": f"并行测试失败：{first_err}"})
+                return
+
+            for st in lanes_state:
+                if st["tokens"] > 0:
+                    st["state"] = "完成"
+            agg_sustained_tps = round((burn_toks_final if use_burn_window else total_toks) / eff_burn_s, 1)
+            per_lane_sustained = round(agg_sustained_tps / max(1, parallel_n), 1)
+            avg_ttft = round(sum(ttfts_all) / len(ttfts_all), 1) if ttfts_all else 0.0
+            p95_ttft = round(ttfts_all[min(len(ttfts_all) - 1, int(len(ttfts_all) * 0.95))], 1) if ttfts_all else 0.0
+            max_ttft = round(ttfts_all[-1], 1) if ttfts_all else 0.0
+
+            par_report = {
+                "model": target_model,
+                "is_local": ep["is_local"],
+                "engine": ep.get("engine", "api"),
+                "engine_slots_info": engine_slots_info,
+                "parallel": parallel_n,
+                "success_lanes": ok_lanes,
+                "context_k": ctx_k,
+                "max_tokens": max_toks,
+                "duration_s": round(eff_burn_s, 1),
+                "total_tokens": total_toks,
+                "aggregate_tps": agg_sustained_tps,
+                "per_lane_tps": per_lane_sustained,
+                "peak_agg_tps": round(max(peak_agg_tps, agg_sustained_tps), 1),
+                "avg_ttft_ms": avg_ttft,
+                "p95_ttft_ms": p95_ttft,
+                "max_ttft_ms": max_ttft,
+                "error_count": total_errs,
+                "peak_vram_gib": round(peak_vram_gib, 2),
+                "peak_gpu_power_w": round(peak_gpu_power_w, 1),
+                "peak_gpu_temp_c": peak_gpu_temp_c,
+                "lanes": [
+                    {
+                        "id": st["id"],
+                        "state": st["state"],
+                        "rounds": st["rounds"],
+                        "tokens": st["tokens"],
+                        "tps": round((max(0, st["tokens"] - burn_base_toks[idx_l]) if use_burn_window else st["tokens"]) / eff_burn_s, 1),
+                        "decode_tps": round(st["tokens"] / max(0.05, st["decode_s"]), 1) if st["decode_s"] > 0 else round(st["tokens"] / eff_burn_s, 1),
+                        "ttft_ms": st["ttft_ms"],
+                    }
+                    for idx_l, st in enumerate(lanes_state)
+                ],
+            }
+            yield _pack({
+                "ok": True,
+                "type": "parallel_done",
+                "percent": 100,
+                "report": par_report,
+                "telemetry": live_hw,
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception as par_ex:
+            yield _pack({
+                "ok": False,
+                "type": "error",
+                "message": f"并行压测执行异常：{type(par_ex).__name__}: {par_ex}",
+            })
+        finally:
+            stop_hw = True
+            hw_task.cancel()
+            for t in lane_tasks:
+                if not t.done():
+                    t.cancel()
+
+    return StreamingResponse(
+        _par_gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "X-Accel-Buffering": "no"},
+    )
 
 
 def _set_windows_console_title(title_text: str) -> None:
@@ -7911,7 +11507,7 @@ def main():
         host = "0.0.0.0"
 
     no_browser = "--no-browser" in sys.argv
-    global SERVER_PORT, _PENDING_BROWSER_OPEN_URL, _WAS_PORT_REPLACED, _UVICORN_SERVER, _PENDING_RESTART_AFTER_UPDATE
+    global SERVER_PORT, _PENDING_BROWSER_OPEN_URL, _WAS_PORT_REPLACED, _UVICORN_SERVER, _PENDING_RESTART_AFTER_UPDATE, _ASGI_DISPATCHER
     was_replaced = _free_port_on_windows(port)
     if not explicit_cli_port and not _is_web_port_bindable(host, port):
         old_p = port
@@ -7940,7 +11536,9 @@ def main():
         print(f"  Host   http://{host}:{port}")
     print("==================================================")
 
-    cfg = uvicorn.Config(app, host=host, port=port, reload=False, use_colors=vt_colors)
+    dispatcher = _HotSwappableASGI(app)
+    _ASGI_DISPATCHER = dispatcher
+    cfg = uvicorn.Config(dispatcher, host=host, port=port, reload=False, use_colors=vt_colors)
     srv = uvicorn.Server(cfg)
     _UVICORN_SERVER = srv
     srv.run()

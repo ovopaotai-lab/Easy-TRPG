@@ -172,8 +172,13 @@ html[data-ui-theme="lamplight"] body .message-container {
 }
 
 html[data-ui-theme="lamplight"] body .message-container > .message-item,
-html[data-ui-theme="lamplight"] body .message-container > .welcome-box {
+html[data-ui-theme="lamplight"] body .message-container > .welcome-box:not(.has-rich-intro-iframe) {
   max-width: min(var(--lp-column), 94%) !important;
+}
+
+html[data-ui-theme="lamplight"] body .message-container > .welcome-box.has-rich-intro-iframe {
+  max-width: min(1100px, 95%) !important;
+  width: 100%;
 }
 
 html[data-ui-theme="lamplight"] body .message-item .bubble-wrap {
@@ -220,7 +225,7 @@ html[data-ui-theme="lamplight"] body .message-item.assistant + .message-item.ass
   border-top: 1px solid var(--lp-line);
 }
 
-html[data-ui-theme="lamplight"] body .message-item.assistant .bubble {
+html[data-ui-theme="lamplight"] body .chat-main:not(.has-custom-css) .message-item.assistant .bubble {
   padding: 0 2px !important;
   font-family: var(--lp-font-story);
   font-size: 16.5px !important;
@@ -245,7 +250,7 @@ html[data-ui-theme="lamplight"] body .message-item.assistant .bubble em {
   color: var(--lp-text-2);
 }
 
-html[data-ui-theme="lamplight"] body .message-item.assistant .bubble blockquote {
+html[data-ui-theme="lamplight"] body .chat-main:not(.has-custom-css) .message-item.assistant .bubble blockquote {
   margin: 1.1em 0 !important;
   padding: 0.35em 0 0.35em 1.1em !important;
   background: transparent !important;
@@ -310,7 +315,7 @@ html[data-ui-theme="lamplight"] body .message-item.user {
   padding: 14px 0 4px 0;
 }
 
-html[data-ui-theme="lamplight"] body .message-item.user .bubble-wrap {
+html[data-ui-theme="lamplight"] body .message-item.user:not(.is-editing-inline) .bubble-wrap {
   width: auto !important;
   max-width: 82% !important;
   margin-left: auto;
@@ -330,7 +335,7 @@ html[data-ui-theme="lamplight"] body .message-item.user .msg-time-label {
 }
 
 html[data-ui-theme="lamplight"] body .message-item.user .bubble {
-  width: auto !important;
+  width: auto;
   padding: 11px 16px !important;
   background: var(--lp-surface-2) !important;
   border: 1px solid var(--lp-line-strong) !important;
@@ -689,7 +694,7 @@ html[data-ui-theme="lamplight"] body .trpg-choices-module ol {
   gap: 8px;
 }
 
-html[data-ui-theme="lamplight"] body .trpg-action-choice-item {
+html[data-ui-theme="lamplight"] body .chat-main:not(.has-custom-css) .trpg-action-choice-item {
   counter-increment: lp-choice;
   list-style: none !important;
   margin: 0 !important;
@@ -705,7 +710,7 @@ html[data-ui-theme="lamplight"] body .trpg-action-choice-item {
   transition: background 0.15s ease, border-color 0.15s ease !important;
 }
 
-html[data-ui-theme="lamplight"] body .trpg-action-choice-item::before {
+html[data-ui-theme="lamplight"] body .chat-main:not(.has-custom-css) .trpg-action-choice-item::before {
   content: counter(lp-choice);
   position: absolute;
   left: 16px;
@@ -811,10 +816,42 @@ html[data-ui-theme="lamplight"] body .insp-pill {
 html[data-ui-theme="lamplight"] body .input-area-wrapper {
   background: linear-gradient(to top, var(--lp-bg) 55%, transparent) !important;
   border: none !important;
+  padding: 6px 14px 4px !important;
+}
+
+html[data-ui-theme="lamplight"] body .corner-meta-bar {
+  color: var(--lp-text-3);
+}
+
+html[data-ui-theme="lamplight"] body .corner-theme-switch {
+  background: rgba(255, 255, 255, 0.025);
+  border-color: var(--lp-line);
+}
+
+html[data-ui-theme="lamplight"] body .corner-theme-btn {
+  color: var(--lp-text-3);
+}
+
+html[data-ui-theme="lamplight"] body .corner-theme-btn:hover {
+  color: var(--lp-text-2);
+}
+
+html[data-ui-theme="lamplight"] body .corner-theme-btn.active {
+  color: var(--lp-accent-hi);
+  background: var(--lp-accent-soft);
+}
+
+html[data-ui-theme="lamplight"] body .corner-version-label {
+  color: var(--lp-text-3);
+}
+
+html[data-ui-theme="lamplight"] body .corner-version-label:hover {
+  color: var(--lp-accent-hi);
+  background: rgba(212, 166, 90, 0.08);
 }
 
 html[data-ui-theme="lamplight"] body .minimalist-input-capsule {
-  max-width: min(calc(var(--lp-column) + 40px), 94%) !important;
+  max-width: min(calc(var(--lp-column) + 60px), 94%) !important;
   background: var(--lp-surface) !important;
   border: 1px solid var(--lp-line-strong) !important;
   border-radius: 20px !important;
@@ -878,6 +915,27 @@ html[data-ui-theme="lamplight"] body .minimalist-plus-popover {
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5) !important;
 }
 
+html[data-ui-theme="lamplight"] body .summary-card {
+  max-width: min(calc(var(--lp-column) + 40px), 94%) !important;
+  width: 100% !important;
+  margin: 0 auto 6px auto !important;
+  background: var(--lp-surface) !important;
+  border: 1px solid var(--lp-line-strong) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.42) !important;
+  padding: 10px 14px !important;
+  z-index: 35 !important;
+}
+
+html[data-ui-theme="lamplight"] body .summary-card .summary-text {
+  min-height: 54px !important;
+  height: auto !important;
+  max-height: var(--summary-text-height, 180px) !important;
+  background: var(--lp-bg-deep) !important;
+  border-left: 3px solid var(--lp-accent) !important;
+  color: var(--lp-text-2) !important;
+}
+
 html[data-ui-theme="lamplight"] body .scroll-bottom-pill {
   background: var(--lp-surface-2) !important;
   border: 1px solid var(--lp-line-strong) !important;
@@ -920,10 +978,18 @@ html[data-ui-theme="lamplight"] body .sidebar .ent-nav-btn.active {
   color: var(--lp-text) !important;
 }
 
-html[data-ui-theme="lamplight"] body .sidebar .btn-sidebar-charcard {
+html[data-ui-theme="lamplight"] body .sidebar .btn-sidebar-charcard,
+html[data-ui-theme="lamplight"] body .sidebar .ent-nav-btn.ent-nav-hub {
   color: var(--lp-accent) !important;
   border-color: var(--lp-accent-line) !important;
   background: var(--lp-accent-soft) !important;
+}
+
+html[data-ui-theme="lamplight"] body .sidebar .btn-sidebar-charcard:hover,
+html[data-ui-theme="lamplight"] body .sidebar .ent-nav-btn.ent-nav-hub:hover {
+  color: var(--lp-accent-hi) !important;
+  border-color: var(--lp-accent) !important;
+  background: rgba(212, 166, 90, 0.18) !important;
 }
 
 html[data-ui-theme="lamplight"] body .sidebar .btn-new-chat,
@@ -1072,6 +1138,7 @@ html[data-ui-theme="lamplight"] body .lp-mode-grid {
   display: flex;
   gap: 12px;
   justify-content: center;
+  flex-wrap: wrap;
 }
 
 html[data-ui-theme="lamplight"] body .lp-mode-card,
@@ -1298,6 +1365,8 @@ html[data-ui-theme="lamplight"] body input[type="range"] {
 html[data-ui-theme="lamplight"] body input[type="checkbox"],
 html[data-ui-theme="lamplight"] body input[type="radio"] {
   accent-color: var(--lp-accent);
+  color-scheme: dark;
+  cursor: pointer;
 }
 
 /* 设置弹窗：界面方向分段控件（与模型弹窗标签一致） */
@@ -1506,7 +1575,7 @@ html[data-ui-theme="lamplight"] body .toast-message {
     max-width: 100% !important;
   }
 
-  html[data-ui-theme="lamplight"] body .chat-main #messageContainer .message-item.assistant .bubble {
+  html[data-ui-theme="lamplight"] body .chat-main:not(.has-custom-css) #messageContainer .message-item.assistant .bubble {
     font-size: 16px !important;
     line-height: 1.88 !important;
     padding: 0 !important;
@@ -1520,12 +1589,12 @@ html[data-ui-theme="lamplight"] body .toast-message {
     padding: 12px !important;
   }
 
-  html[data-ui-theme="lamplight"] body .trpg-action-choice-item {
+  html[data-ui-theme="lamplight"] body .chat-main:not(.has-custom-css) .trpg-action-choice-item {
     padding: 11px 14px 11px 46px !important;
     font-size: 14px !important;
   }
 
-  html[data-ui-theme="lamplight"] body .trpg-action-choice-item::before {
+  html[data-ui-theme="lamplight"] body .chat-main:not(.has-custom-css) .trpg-action-choice-item::before {
     left: 13px;
     top: 11px;
   }
@@ -1568,4 +1637,138 @@ html[data-ui-theme="lamplight"][lang="en"] body .message-item.assistant.is-inter
 html[data-ui-theme="lamplight"] body .sidebar-update-dot {
   background: var(--lp-accent);
   box-shadow: 0 0 0 2px rgba(212, 166, 90, 0.28);
+}
+
+
+html[data-ui-theme="lamplight"] body .minimalist-cot-btn {
+  background: transparent !important;
+  border: 1px solid var(--lp-line-strong) !important;
+  color: var(--lp-text-3) !important;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-family: var(--lp-font-ui);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+html[data-ui-theme="lamplight"] body .minimalist-cot-btn:hover {
+  background: var(--lp-surface-2) !important;
+  border-color: var(--lp-accent-line) !important;
+  color: var(--lp-text-2) !important;
+}
+html[data-ui-theme="lamplight"] body .minimalist-cot-btn.active {
+  background: var(--lp-surface-2) !important;
+  border-color: var(--lp-accent-line) !important;
+  color: var(--lp-accent-hi) !important;
+}
+
+html[data-ui-theme="lamplight"] body .bubble details.memory-collapse-card {
+  background: transparent !important;
+  border: 1px dashed var(--lp-line-strong) !important;
+  border-radius: 9px !important;
+  font-family: var(--lp-font-ui);
+  font-size: 12.5px;
+  color: var(--lp-text-3);
+  margin: 0.9em 0 0.6em 0 !important;
+}
+html[data-ui-theme="lamplight"] body .bubble details.memory-collapse-card > summary {
+  color: var(--lp-text-3) !important;
+  background: transparent !important;
+}
+html[data-ui-theme="lamplight"] body .bubble details.memory-collapse-card .memory-collapse-body {
+  border-top: 1px dashed var(--lp-line) !important;
+  color: var(--lp-text-2) !important;
+}
+html[data-ui-theme="lamplight"] body .bubble details.memory-collapse-card .mem-sec-label {
+  color: var(--lp-accent-hi) !important;
+}
+
+/* ==================== 灯下书卷主题 · 一键热更新进度浮窗与按钮进度条 ==================== */
+html[data-ui-theme="lamplight"] body .sidebar-update-btn-fill {
+  background: linear-gradient(90deg, rgba(212, 166, 90, 0.24), rgba(232, 190, 114, 0.34));
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-floating-card {
+  background: rgba(27, 25, 23, 0.96);
+  border: 1px solid var(--lp-accent-line);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(236, 224, 200, 0.05) inset;
+  font-family: var(--lp-font-ui);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-title {
+  color: var(--lp-text);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-ver-pill {
+  background: var(--lp-surface-2);
+  border-color: var(--lp-line-strong);
+  color: var(--lp-accent-hi);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-pct {
+  color: var(--lp-accent-hi);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-dot-indicator {
+  background: var(--lp-accent);
+  box-shadow: 0 0 0 3px rgba(212, 166, 90, 0.22);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-dot-indicator.is-done {
+  background: var(--lp-hp);
+  box-shadow: 0 0 0 3px rgba(127, 182, 154, 0.25);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-dot-indicator.is-error {
+  background: var(--lp-danger);
+  box-shadow: 0 0 0 3px rgba(215, 122, 104, 0.25);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-progress-track {
+  background: rgba(236, 224, 200, 0.09);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-progress-fill {
+  background: linear-gradient(90deg, #b8893d 0%, var(--lp-accent) 50%, var(--lp-accent-hi) 100%);
+  background-size: 200% 100%;
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-progress-fill.is-done {
+  background: linear-gradient(90deg, #629d80, var(--lp-hp));
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-progress-fill.is-error {
+  background: linear-gradient(90deg, #bf5d4b, var(--lp-danger));
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-stage-text {
+  color: var(--lp-text-2);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-mini-btn {
+  background: var(--lp-surface-2);
+  border-color: var(--lp-line-strong);
+  color: var(--lp-text-2);
+}
+
+html[data-ui-theme="lamplight"] body .hot-update-mini-btn:hover {
+  border-color: var(--lp-accent-line);
+  color: var(--lp-accent-hi);
+  background: var(--lp-accent-soft);
+}
+
+html[data-ui-theme="lamplight"] body .sidebar .sidebar-bench-btn {
+  color: var(--lp-accent) !important;
+  border-color: var(--lp-accent-line) !important;
+  background: var(--lp-accent-soft) !important;
+}
+
+html[data-ui-theme="lamplight"] body .sidebar .sidebar-bench-btn:hover {
+  color: var(--lp-accent-hi) !important;
+  border-color: var(--lp-accent) !important;
+  background: rgba(212, 166, 90, 0.18) !important;
+}
+
+html[data-ui-theme="lamplight"] body .bench-kpi-main strong {
+  color: var(--lp-accent-hi);
 }

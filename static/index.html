@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%B2%3C/text%3E%3C/svg%3E">
-  <title>AI 跑团 (alpha 1.5)</title>
+  <title>AI 跑团 (alpha 1.6)</title>
   <script>
     // 界面风格：minimal（极简，默认）/ classic（经典）。在样式加载前设置，避免切换闪烁
     (function () {
@@ -17,9 +17,9 @@
       document.documentElement.setAttribute("data-ui-theme", mode);
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=29.0">
+  <link rel="stylesheet" href="/static/style.css?v=30.6">
   <link rel="stylesheet" href="/static/theme-colors.css?v=1.0">
-  <link rel="stylesheet" href="/static/theme.css?v=1.2">
+  <link rel="stylesheet" href="/static/theme.css?v=1.8">
   <script src="/static/marked.min.js"></script>
 </head>
 <body class="dark-theme desktop-sidebar-collapsed">
@@ -48,20 +48,26 @@
     <!-- 左侧抽屉栏（默认收起，点击左上角 [面板] 滑出） -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <!-- 角色卡库 -->
-        <button id="btnHeaderCharCardSettings" class="btn btn-secondary btn-sidebar-charcard" type="button" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openCharCardSettingsModal && window.openCharCardSettingsModal()">
-          <span></span> 角色卡库
-        </button>
-
-        <!-- 新建 / 高级新建 -->
-        <div class="enterprise-nav-grid">
-          <button type="button" class="ent-nav-btn active" id="btnNewProject">
-            <span>+</span> 新建
-          </button>
-          <button type="button" class="ent-nav-btn" id="btnNavExplore" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openExploreModal && window.openExploreModal()">
-            <span></span> 高级新建
-          </button>
+        <!-- 顶部功能矩阵：第一排「游戏卡库 / 玩家人设」，第二排「简易创作 / 高级创作」（导入收纳至二级菜单） -->
+        <div class="sidebar-top-matrix">
+          <div class="enterprise-nav-grid">
+            <button type="button" class="ent-nav-btn ent-nav-hub" id="btnNavExplore" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openExploreModal && window.openExploreModal()" title="管理全部游戏卡，支持导入/导出酒馆或本工作台 .png / .json 游戏卡">
+              游戏卡库
+            </button>
+            <button type="button" class="ent-nav-btn" id="btnHeaderCharCardSettings" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openCharCardSettingsModal && window.openCharCardSettingsModal()" title="管理玩家扮演人设与随行人物卡">
+              玩家人设
+            </button>
+          </div>
+          <div class="enterprise-nav-grid">
+            <button type="button" class="ent-nav-btn" id="btnNewProject" title="三步向导快速创建简易游戏卡（后续可一键升级为高级卡）">
+              简易创作
+            </button>
+            <button type="button" class="ent-nav-btn" id="btnNavAdvancedCreate" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.startAdvancedForkEditor && window.startAdvancedForkEditor(null)" title="一键进入三栏高级创作台（支持世界书、内置CSS、正则与快捷指令）">
+              高级创作
+            </button>
+          </div>
         </div>
+        <input type="file" id="globalGameCardImportInput" accept=".png,.json" multiple style="display:none;" onchange="window.handleImportGameCardFiles && window.handleImportGameCardFiles(event)" />
 
         <!-- 剧本列表 -->
         <div id="projectPillsList" class="project-pills-list"></div>
@@ -86,8 +92,11 @@
         <div id="chatList" class="chat-list"></div>
       </div>
 
-      <!-- 侧栏底部系统菜单（模型设置与下载模型位于系统设置正上方） -->
+      <!-- 侧栏底部系统菜单（性能测试、模型与下载、设置与热更新） -->
       <div class="sidebar-footer" style="display: flex; flex-direction: column; gap: 6px;">
+        <button id="btnSidebarBenchmark" class="btn btn-secondary footer-btn sidebar-bench-btn" style="width:100%;" type="button" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openBenchmarkModal && window.openBenchmarkModal()" title="对本机硬件与指定模型进行全维度实时性能测试">
+          性能测试
+        </button>
         <div style="display: flex; gap: 6px;">
           <button id="btnOpenModelSettings" class="btn btn-secondary footer-btn" style="flex:1;" type="button" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openModelSettingsModal && window.openModelSettingsModal()">
             <span></span> 模型
@@ -100,9 +109,10 @@
           <button id="btnOpenSettings" class="btn btn-secondary footer-btn" style="flex:1;" type="button">
             <span></span> 设置
           </button>
-          <button id="btnSidebarUpdate" class="btn btn-secondary footer-btn" style="flex:1;position:relative;" type="button" onclick="window.closeAnySidebarDrawer && window.closeAnySidebarDrawer(); window.openUpdatePanel && window.openUpdatePanel()">
-            <span></span> 更新
-            <span id="sidebarUpdateDot" class="sidebar-update-dot" style="display:none;" title="发现新版本"></span>
+          <button id="btnSidebarUpdate" class="btn btn-secondary footer-btn sidebar-update-btn" style="flex:1;position:relative;overflow:hidden;" type="button" onclick="window.startOneClickHotUpdate && window.startOneClickHotUpdate({ source: 'sidebar' })">
+            <span id="sidebarUpdateBtnFill" class="sidebar-update-btn-fill" style="width:0%;"></span>
+            <span id="sidebarUpdateBtnText" style="position:relative;z-index:1;">更新</span>
+            <span id="sidebarUpdateDot" class="sidebar-update-dot" style="display:none;" title="发现新版本，点击一键热更新"></span>
           </button>
         </div>
       </div>
@@ -134,6 +144,9 @@
           <button id="activeProjectBadge" class="project-badge" type="button" title="剧本设定">
             <span class="badge-icon"></span>
             <span id="activeProjectName">默认剧本</span>
+          </button>
+          <button id="btnHeaderProjectIntro" class="btn btn-xs btn-outline-secondary header-intro-btn" type="button" style="display: none;" onclick="window.openProjectIntroModal && window.openProjectIntroModal()" title="查看作品详细介绍 / 开局设定器">
+            介绍
           </button>
           <div class="title-wrapper" id="titleClickArea" title="重命名">
             <h3 id="currentChatTitle" class="chat-title">未命名对话</h3>
@@ -167,13 +180,22 @@
           <button class="mobile-menu-item" type="button" onclick="window.toggleStudioWorkbench && window.toggleStudioWorkbench(true)">
             剧本设定
           </button>
-          <button class="mobile-menu-item" type="button" onclick="window.openCharCardSettingsModal && window.openCharCardSettingsModal()">
-            角色卡库
+          <button class="mobile-menu-item" type="button" onclick="document.getElementById('mobileMoreMenu').style.display='none'; window.openExploreModal && window.openExploreModal()">
+            游戏卡库
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="document.getElementById('mobileMoreMenu').style.display='none'; window.openCharCardSettingsModal && window.openCharCardSettingsModal()">
+            玩家人设
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="document.getElementById('mobileMoreMenu').style.display='none'; window.openGuidedGameCardModal && window.openGuidedGameCardModal(null)">
+            简易创作
+          </button>
+          <button class="mobile-menu-item" type="button" onclick="document.getElementById('mobileMoreMenu').style.display='none'; window.startAdvancedForkEditor && window.startAdvancedForkEditor(null)">
+            高级创作
           </button>
           <button class="mobile-menu-item" type="button" onclick="window.openGalleryModal && window.openGalleryModal()">
             素材图库
           </button>
-          <button class="mobile-menu-item" type="button" onclick="document.getElementById('btnToggleSummary')?.click()">
+          <button class="mobile-menu-item" type="button" onclick="window.toggleSummaryCard && window.toggleSummaryCard(undefined, event)">
             前情备忘
           </button>
           <button class="mobile-menu-item" type="button" onclick="window.openPromptLogModal && window.openPromptLogModal()">
@@ -188,11 +210,14 @@
           <button class="mobile-menu-item" type="button" onclick="window.toggleLanguageMenu && window.toggleLanguageMenu(event)">
             语言
           </button>
+          <button class="mobile-menu-item" id="btnMobileBenchmark" type="button" onclick="document.getElementById('mobileMoreMenu').style.display='none'; window.openBenchmarkModal && window.openBenchmarkModal()">
+            性能测试
+          </button>
           <button class="mobile-menu-item" id="btnMobileOpenSettings" type="button">
             设置
           </button>
-          <button class="mobile-menu-item" id="btnMobileCheckUpdate" type="button" onclick="document.getElementById('mobileMoreMenu').style.display='none'; window.openUpdatePanel && window.openUpdatePanel()">
-            检查更新
+          <button class="mobile-menu-item" id="btnMobileCheckUpdate" type="button" onclick="document.getElementById('mobileMoreMenu').style.display='none'; window.startOneClickHotUpdate && window.startOneClickHotUpdate({ source: 'menu' })">
+            一键更新
           </button>
           <button class="mobile-menu-item" id="btnMobileOpenRemote" type="button" style="display:none !important;"></button>
           <button class="mobile-menu-item" id="btnMobileOpenUser" type="button" style="display:none !important;"></button>
@@ -210,7 +235,8 @@
           <div class="lp-welcome">
             <h1 class="lp-welcome-title">一键跑团</h1>
             <div class="lp-mode-grid">
-              <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode && window.enterInitialGameMode('proj_default', event)">跑团</button>
+              <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode && window.enterInitialGameMode('proj_fast_trpg', event)">极速跑团</button>
+              <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode && window.enterInitialGameMode('proj_default', event)">高级跑团</button>
               <button type="button" class="lp-mode-card" onclick="window.enterInitialGameMode && window.enterInitialGameMode('proj_free_chat', event)">聊天</button>
             </div>
           </div>
@@ -235,16 +261,16 @@
           <div class="summary-card-tools" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
             <select id="summaryAiModelSelect" class="form-select ai-assist-model-select" style="display:none;" onchange="window.handleAiAssistModelChange && window.handleAiAssistModelChange(this.value)"></select>
             <button id="btnRetriggerSummaryCard" class="btn btn-xs btn-primary" type="button" onclick="window.handleManualSummarize && window.handleManualSummarize()">总结</button>
-            <button id="btnEditSummary" class="btn btn-xs btn-secondary" type="button">编辑</button>
-            <button id="btnCloseSummaryCard" class="btn btn-xs btn-outline-secondary" type="button">收起</button>
+            <button id="btnEditSummary" class="btn btn-xs btn-secondary" type="button" onclick="window.openSummaryEditor && window.openSummaryEditor(event)">编辑</button>
+            <button id="btnCloseSummaryCard" class="btn btn-xs btn-outline-secondary" type="button" onclick="window.closeSummaryCard && window.closeSummaryCard(event)" title="关闭前情备忘 (Esc)">收起 ✕</button>
           </div>
         </div>
         <div id="summaryText" class="summary-text markdown-body"></div>
         <div id="summaryEditBox" class="summary-edit-box" style="display: none;">
           <textarea id="summaryEditTextarea" class="form-textarea" rows="5" placeholder="剧情与角色状态"></textarea>
           <div class="summary-edit-actions">
-            <button id="btnCancelSummaryEdit" class="btn btn-xs btn-secondary" type="button">取消</button>
-            <button id="btnSaveSummaryEdit" class="btn btn-xs btn-primary" type="button">保存</button>
+            <button id="btnCancelSummaryEdit" class="btn btn-xs btn-secondary" type="button" onclick="window.closeSummaryEditor && window.closeSummaryEditor(event)">取消</button>
+            <button id="btnSaveSummaryEdit" class="btn btn-xs btn-primary" type="button" onclick="window.handleSaveSummaryEdit && window.handleSaveSummaryEdit(event)">保存</button>
           </div>
         </div>
       </div>
@@ -261,12 +287,12 @@
                 <span>上传图片</span>
               </label>
               <button class="plus-popover-item" id="btnOpenCharCardModal" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover(); window.openCharCardPickerModal && window.openCharCardPickerModal()">
-                <span>角色卡 <small id="charCardCountBadge" class="toolbar-count-pill">0</small></span>
+                <span>玩家人设 <small id="charCardCountBadge" class="toolbar-count-pill">0</small></span>
               </button>
               <button class="plus-popover-item" id="btnOpenGalleryModal" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover(); window.openGalleryModal && window.openGalleryModal()">
                 <span>素材图库 <small id="galleryCountBadge" class="toolbar-count-pill">0</small></span>
               </button>
-              <button class="plus-popover-item" id="btnToggleSummary" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover()">
+              <button class="plus-popover-item" id="btnToggleSummary" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover(); window.toggleSummaryCard && window.toggleSummaryCard(undefined, event)">
                 <span>前情备忘 <span id="summaryDot" class="badge-dot" style="display: none;"></span></span>
               </button>
               <button class="plus-popover-item" id="btnOpenPromptLog" type="button" onclick="window.closeMinimalistPlusPopover && window.closeMinimalistPlusPopover(); window.openPromptLogModal && window.openPromptLogModal()">
@@ -312,6 +338,9 @@
             </div>
           </div>
 
+          <!-- 快捷回复指令栏（仅当游戏卡配置了 quick_replies 时显示） -->
+          <div id="quickRepliesBar" class="quick-replies-bar" style="display: none;"></div>
+
           <div id="resizerInputArea" style="display:none !important;"></div>
           <div class="input-box-row minimalist-capsule-row">
             <button type="button" id="btnTogglePlusPopover" class="minimalist-plus-btn" onclick="window.toggleMinimalistPlusPopover && window.toggleMinimalistPlusPopover(event)" title="更多">
@@ -323,6 +352,9 @@
               placeholder="输入行动或对白..."
             ></textarea>
             <div class="send-action-stack minimalist-send-wrap">
+              <button id="btnToggleCot" class="minimalist-cot-btn" type="button" onclick="window.handleToggleCotButton && window.handleToggleCotButton(event)" title="思考 (CoT) 开关">
+                <span>思考</span>
+              </button>
               <button id="btnSend" class="btn btn-primary send-btn minimalist-send-btn" type="button">
                 <span>发送</span>
               </button>
@@ -334,6 +366,18 @@
               </button>
             </div>
           </div>
+        </div>
+        <div id="cornerMetaBar" class="corner-meta-bar">
+          <div id="cornerThemeSwitch" class="corner-theme-switch" role="group" aria-label="切换简约版与经典版">
+            <button type="button" id="btnCornerThemeLamplight" class="corner-theme-btn active" onclick="window.handleCornerThemeClick && window.handleCornerThemeClick('lamplight', event)" title="切换为简约版界面">简约版</button>
+            <span class="corner-theme-sep">/</span>
+            <button type="button" id="btnCornerThemeClassic" class="corner-theme-btn" onclick="window.handleCornerThemeClick && window.handleCornerThemeClick('classic', event)" title="切换为经典版界面">经典版</button>
+          </div>
+          <span class="corner-meta-dot">·</span>
+          <button type="button" id="cornerAppVersionBtn" class="corner-version-label" onclick="window.startOneClickHotUpdate && window.startOneClickHotUpdate({ source: 'corner' })" title="当前版本（点击一键热更新）">
+            <span id="cornerAppVersionText">alpha 1.6</span>
+            <span id="cornerUpdateDot" class="corner-update-dot" style="display: none;"></span>
+          </button>
         </div>
       </footer>
     </main>
@@ -445,8 +489,12 @@
   <!-- ================= 模态弹窗2.5：极简模型设置（含 4 项：模型列表 / 本地与指定路径 / 下载模型(HF) / API + 单模型最高优先级独立参数） ================= -->
   <div id="modelSettingsModal" class="modal-overlay" style="display: none; z-index: 2600;">
     <div class="modal-card modal-lg" style="max-width: 820px;">
-      <div class="modal-header">
-        <h3>模型</h3>
+      <div class="modal-header" style="gap:10px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <h3 style="margin:0;">模型</h3>
+          <button type="button" class="btn btn-xs btn-secondary" onclick="document.getElementById('modelSettingsModal').style.display='none'; window.openBenchmarkModal && window.openBenchmarkModal()" title="测试当前或指定模型与本机硬件性能">性能测试</button>
+          <button type="button" id="btnUnloadLocalVram" class="btn btn-xs btn-secondary" onclick="window.unloadLocalModelsVram && window.unloadLocalModelsVram(this)" title="立即停止后台本地推理引擎并释放显存与内存">释放显存</button>
+        </div>
         <button class="modal-close" id="btnCloseModelSettingsModal" type="button" onclick="document.getElementById('modelSettingsModal').style.display='none'">✕</button>
       </div>
       <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
@@ -580,20 +628,31 @@
                 <input type="range" id="pm_max_tokens_range" min="256" max="65536" step="256" value="8192" oninput="document.getElementById('pm_max_tokens').value=this.value" />
               </div>
 
-              <div class="param-slider-row">
-                <div class="param-slider-header">
-                  <span>上下文轮数</span>
-                  <input type="number" id="pm_context" class="param-num-input" step="1" min="2" max="200" value="64" oninput="document.getElementById('pm_context_range').value=this.value" />
+              <div class="param-slider-row context-integrated-card" style="grid-column: 1 / -1;">
+                <div class="param-slider-header" style="gap:8px;margin-bottom:6px;">
+                  <span>上下文</span>
+                  <select id="pm_context_mode" class="form-select" style="width:auto;padding:2px 8px;font-size:12px;height:26px;" onchange="const g=document.getElementById('pmContextTurnsGroup');if(g)g.style.display=this.value==='tokens'?'none':'';">
+                    <option value="turns">按轮数</option>
+                    <option value="tokens">按 Token</option>
+                  </select>
                 </div>
-                <input type="range" id="pm_context_range" min="2" max="200" step="1" value="64" oninput="document.getElementById('pm_context').value=this.value" />
-              </div>
-
-              <div class="param-slider-row">
-                <div class="param-slider-header">
-                  <span>上下文上限 (k)</span>
-                  <input type="number" id="pm_max_context_k" class="param-num-input" step="4" min="4" max="512" value="96" oninput="document.getElementById('pm_max_context_k_range').value=this.value" />
+                <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(190px, 1fr));gap:12px;align-items:start;">
+                  <div id="pmContextTurnsGroup">
+                    <div class="param-slider-header">
+                      <span style="font-size:12px;color:var(--text-muted);">上下文轮数</span>
+                      <input type="number" id="pm_context" class="param-num-input" step="1" min="2" max="200" value="64" oninput="document.getElementById('pm_context_range').value=this.value" />
+                    </div>
+                    <input type="range" id="pm_context_range" min="2" max="200" step="1" value="64" oninput="document.getElementById('pm_context').value=this.value" />
+                  </div>
+                  <div>
+                    <div class="param-slider-header">
+                      <span style="font-size:12px;color:var(--text-muted);">上下文上限 (k)</span>
+                      <input type="number" id="pm_max_context_k" class="param-num-input" step="4" min="4" max="512" value="96" oninput="document.getElementById('pm_max_context_k_range').value=this.value" />
+                    </div>
+                    <input type="range" id="pm_max_context_k_range" min="4" max="512" step="4" value="96" oninput="document.getElementById('pm_max_context_k').value=this.value" />
+                    <small class="param-item-hint">单位 k</small>
+                  </div>
                 </div>
-                <input type="range" id="pm_max_context_k_range" min="4" max="512" step="4" value="96" oninput="document.getElementById('pm_max_context_k').value=this.value" />
               </div>
 
               <div class="param-slider-row">
@@ -766,20 +825,26 @@
       <div class="modal-body">
         <!-- ================= 1. 全局系统参数（默认显示） ================= -->
         <div style="display:flex;flex-direction:column;gap:12px;">
-          <!-- 一键更新卡片（100% 保留 data/ 存档角色卡与 model/ 本地模型） -->
+          <!-- 一键热更新卡片（100% 保留 data/ 存档角色卡与 model/ 本地模型） -->
           <div id="systemUpdateCard" class="context-setting-card" style="padding:12px 14px;display:flex;flex-direction:column;gap:8px;">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <b>版本更新</b>
-                <span id="currentAppVersionBadge" class="wb-badge" style="font-size:11.5px;">alpha 1.5</span>
+                <b>版本热更新</b>
+                <span id="currentAppVersionBadge" class="wb-badge" style="font-size:11.5px;">alpha 1.6</span>
                 <span id="newAppVersionBadge" class="wb-badge" style="display:none;font-size:11.5px;color:var(--tc-6ee7b7, #6ee7b7);border-color:var(--tc-rgba-16-185-129-0-45, rgba(16,185,129,0.45));background:var(--tc-rgba-16-185-129-0-12, rgba(16,185,129,0.12));"></span>
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                <button type="button" id="btnCheckAppUpdate" class="btn btn-xs btn-secondary" onclick="window.checkSystemUpdate && window.checkSystemUpdate({ silent: false })">检查更新</button>
-                <button type="button" id="btnApplyAppUpdate" class="btn btn-xs btn-primary" style="display:none;" onclick="window.applySystemUpdate && window.applySystemUpdate()">一键更新</button>
+                <button type="button" id="btnCheckAppUpdate" class="btn btn-xs btn-primary" onclick="window.startOneClickHotUpdate && window.startOneClickHotUpdate({ source: 'settings' })">一键更新</button>
+                <button type="button" id="btnApplyAppUpdate" class="btn btn-xs btn-secondary" style="display:none;" onclick="window.startOneClickHotUpdate && window.startOneClickHotUpdate({ forceReinstall: true, source: 'settings' })">热修复</button>
               </div>
             </div>
-            <div id="systemUpdateStatusText" style="font-size:12px;color:var(--text-dim);line-height:1.5;">完整保留所有存档、剧本、角色卡与本地模型，更新前自动备份旧版代码并平滑重启</div>
+            <div id="systemUpdateProgressWrap" class="hot-update-inline-progress" style="display:none;">
+              <div class="hot-update-progress-track">
+                <div id="systemUpdateProgressFill" class="hot-update-progress-fill" style="width:0%;"></div>
+              </div>
+              <span id="systemUpdateProgressPct" class="hot-update-pct">0%</span>
+            </div>
+            <div id="systemUpdateStatusText" style="font-size:12px;color:var(--text-dim);line-height:1.5;">点击一次即可自动检查、下载并执行零停机热更新（完整保留所有存档、角色卡与已加载本地模型）</div>
             <pre id="systemUpdateNotesPre" style="display:none;margin:0;padding:8px 10px;border-radius:8px;background:rgba(0,0,0,0.22);border:1px solid var(--border-color);font-size:11.5px;color:var(--text-muted);white-space:pre-wrap;word-break:break-word;max-height:140px;overflow-y:auto;font-family:inherit;"></pre>
           </div>
 
@@ -803,11 +868,11 @@
             <div class="form-group">
               <label><b>界面风格</b></label>
               <div class="gui-orientation-seg-bar" id="uiThemeSegBar">
-                <button type="button" id="btnUiThemeLamplight" class="gui-orient-seg-btn" onclick="window.setUiTheme && window.setUiTheme('lamplight')">
-                  极简
+                <button type="button" id="btnUiThemeLamplight" class="gui-orient-seg-btn" onclick="window.setUiTheme && window.setUiTheme('lamplight', true)">
+                  简约版
                 </button>
-                <button type="button" id="btnUiThemeClassic" class="gui-orient-seg-btn" onclick="window.setUiTheme && window.setUiTheme('classic')">
-                  经典
+                <button type="button" id="btnUiThemeClassic" class="gui-orient-seg-btn" onclick="window.setUiTheme && window.setUiTheme('classic', true)">
+                  经典版
                 </button>
               </div>
               <small class="param-item-hint">仅本设备生效</small>
@@ -832,6 +897,7 @@
                   <span id="globalParamsModelOverrideBadge" class="wb-badge" style="display:none;color:var(--tc-fcd34d, #fcd34d);border-color:var(--tc-rgba-245-158-11-0-45, rgba(245,158,11,0.45));background:var(--tc-rgba-245-158-11-0-12, rgba(245,158,11,0.12));font-size:11px;">已被模型参数覆盖</span>
                 </div>
                 <div id="globalParamsHeaderActions" style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button type="button" id="btnHardwareRecommendParams" class="btn btn-xs btn-outline-secondary" onclick="window.applyHardwareRecommendedParams && window.applyHardwareRecommendedParams()" title="根据本机配置自动分配最佳上下文与轮次">硬件推荐</button>
                   <button type="button" id="btnResetGlobalParams" class="btn btn-xs btn-outline-secondary">恢复默认</button>
                   <button type="button" id="btnSyncGlobalParamsToProjects" class="btn btn-xs btn-secondary" title="同步到全部剧本">同步全部</button>
                 </div>
@@ -919,33 +985,33 @@
                     <small class="param-item-hint">默认 8192</small>
                   </div>
 
-                  <!-- 9. 上下文计算方式 + 轮数 / Token 长度 -->
-                  <div class="param-slider-row">
-                    <div class="param-slider-header" style="gap:6px;">
-                      <span>上下文计算</span>
+                  <!-- 9. 上下文模式与上限（一体化卡片） -->
+                  <div class="param-slider-row context-integrated-card" style="grid-column: 1 / -1;">
+                    <div class="param-slider-header" style="gap:8px;margin-bottom:6px;">
+                      <span>上下文</span>
                       <select id="settingContextMode" class="form-select" style="width:auto;padding:2px 8px;font-size:12px;height:26px;">
                         <option value="turns">按轮数</option>
                         <option value="tokens">按 Token</option>
                       </select>
                     </div>
-                    <div id="settingContextTurnsGroup">
-                      <div class="param-slider-header" style="margin-top:4px;">
-                        <span style="font-size:12px;color:var(--text-muted);">上下文轮数</span>
-                        <input type="number" id="settingContextTurns" class="param-num-input" step="1" min="2" max="200" value="64" />
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(195px, 1fr));gap:12px;align-items:start;">
+                      <div id="settingContextTurnsGroup">
+                        <div class="param-slider-header">
+                          <span style="font-size:12px;color:var(--text-muted);">上下文轮数</span>
+                          <input type="number" id="settingContextTurns" class="param-num-input" step="1" min="2" max="200" value="64" />
+                        </div>
+                        <input type="range" id="settingContextTurnsRange" min="2" max="200" step="1" value="64" />
+                        <small class="param-item-hint">保留最近 <b id="settingContextMsgsHint">128</b> 条消息</small>
                       </div>
-                      <input type="range" id="settingContextTurnsRange" min="2" max="200" step="1" value="64" />
-                      <small class="param-item-hint">保留最近 <b id="settingContextMsgsHint">128</b> 条消息</small>
+                      <div>
+                        <div class="param-slider-header">
+                          <span style="font-size:12px;color:var(--text-muted);">上下文上限 (k)</span>
+                          <input type="number" id="settingMaxContextK" class="param-num-input" step="4" min="4" max="512" value="96" />
+                        </div>
+                        <input type="range" id="settingMaxContextKRange" min="4" max="512" step="4" value="96" />
+                        <small class="param-item-hint">单位 k</small>
+                      </div>
                     </div>
-                  </div>
-
-                  <!-- 9.5 最大上下文 Token 长度 (k) -->
-                  <div class="param-slider-row">
-                    <div class="param-slider-header">
-                      <span>上下文上限 (k)</span>
-                      <input type="number" id="settingMaxContextK" class="param-num-input" step="4" min="4" max="512" value="96" />
-                    </div>
-                    <input type="range" id="settingMaxContextKRange" min="4" max="512" step="4" value="96" />
-                    <small class="param-item-hint">默认 96k</small>
                   </div>
 
                   <!-- 10. 压缩保留近期消息数 -->
@@ -976,20 +1042,7 @@
               </div>
             </div>
 
-            <!-- 系统提示词 -->
-            <div class="context-setting-card" style="margin-bottom:14px;border-color:var(--tc-rgba-245-158-11-0-42, rgba(245,158,11,0.42));background:var(--tc-rgba-245-158-11-0-04, rgba(245,158,11,0.04));">
-              <div class="context-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-                <div style="display:flex;align-items:center;gap:6px;">
-                  <b style="color:var(--tc-fcd34d, #fcd34d);">系统提示词</b>
-                </div>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                  <button type="button" class="btn btn-xs btn-outline-secondary" style="border-color:var(--tc-rgba-245-158-11-0-5, rgba(245,158,11,0.5));color:var(--tc-fde68a, #fde68a);" onclick="window.resetGlobalSystemProtocolPrompt && window.resetGlobalSystemProtocolPrompt()">恢复默认</button>
-                </div>
-              </div>
-              <div class="context-body" style="padding-top:8px;">
-                <textarea id="settingGlobalSystemProtocolPrompt" rows="10" class="form-textarea" style="font-size:11.5px;line-height:1.55;width:100%;" placeholder="输入系统提示词..." onblur="window.saveGlobalSystemProtocolPrompt && window.saveGlobalSystemProtocolPrompt(this.value)"></textarea>
-              </div>
-            </div>
+
 
             <div class="form-group" style="margin-bottom:6px;">
               <label><b>访问地址</b></label>
@@ -1270,16 +1323,16 @@
     </div>
   </div>
 
-  <!-- ================= 模态弹窗9A：回复发送时选择角色卡（仅选择角色发送） ================= -->
+  <!-- ================= 模态弹窗9A：回复发送时选择玩家人设 ================= -->
   <div id="charCardSelectModal" class="modal-overlay" style="display: none;">
     <div class="modal-card modal-xl" style="max-width:760px;">
       <div class="modal-header">
-        <h3>选择角色卡</h3>
+        <h3>选择玩家人设</h3>
         <button class="modal-close" type="button" onclick="document.getElementById('charCardSelectModal').style.display='none'">✕</button>
       </div>
       <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
-          <input type="text" id="charCardPickerSearchInput" class="form-input" style="max-width:240px;" placeholder="搜索角色..." oninput="window.renderCharCardPicker()" />
+          <input type="text" id="charCardPickerSearchInput" class="form-input" style="max-width:240px;" placeholder="搜索人设..." oninput="window.renderCharCardPicker()" />
         </div>
         <div id="charCardPickerGrid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));gap:10px;max-height:52vh;overflow-y:auto;padding:2px;"></div>
       </div>
@@ -1293,21 +1346,21 @@
     </div>
   </div>
 
-  <!-- ================= 模态弹窗9B：角色卡库 ================= -->
+  <!-- ================= 模态弹窗9B：玩家人设库 ================= -->
   <div id="charCardModal" class="modal-overlay" style="display: none;">
     <div class="modal-card modal-xl" style="max-width:860px;">
       <div class="modal-header">
-        <h3>角色卡库</h3>
+        <h3>玩家人设</h3>
         <button class="modal-close" type="button" onclick="document.getElementById('charCardModal').style.display='none'">✕</button>
       </div>
       <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-            <button type="button" class="btn btn-primary btn-sm" onclick="window.openCharCardEditorModal(null, 'simple')">新建</button>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('charCardImportFileInput').click()">导入</button>
+            <button type="button" class="btn btn-primary btn-sm" onclick="window.openCharCardEditorModal(null, 'simple')">新建人设</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('charCardImportFileInput').click()">导入人设</button>
             <input type="file" id="charCardImportFileInput" accept=".json,.png" multiple style="display:none;" onchange="window.handleImportCharCardFiles(event)" />
           </div>
-          <input type="text" id="charCardSearchInput" class="form-input" style="max-width:240px;" placeholder="搜索角色卡..." oninput="window.renderCharCardLibrary()" />
+          <input type="text" id="charCardSearchInput" class="form-input" style="max-width:240px;" placeholder="搜索玩家人设..." oninput="window.renderCharCardLibrary()" />
         </div>
 
         <div id="charCardLibraryGrid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(250px, 1fr));gap:10px;max-height:52vh;overflow-y:auto;padding:2px;"></div>
@@ -1597,8 +1650,460 @@
     </button>
   </div>
 
-  <script src="/static/i18n.js?v=37.0"></script>
-  <script src="/static/app.js?v=37.0"></script>
-  <script src="/static/enterprise.js?v=37.0"></script>
+  <!-- 模态弹窗11：简易创作 · 可分享游戏卡向导（与高级创作 & 酒馆卡互通） -->
+  <div id="guidedGameCardModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)this.style.display='none'">
+    <div class="modal-card modal-xl guided-gc-modal-card" id="guidedGameCardModalInner"></div>
+  </div>
+
+  <!-- 模态弹窗11.5：作品详细介绍 / 交互式开局设定器弹窗 -->
+  <div id="projectIntroModal" class="modal-overlay" style="display: none; z-index: 10055;" onclick="if(event.target===this)this.style.display='none'">
+    <div class="modal-card modal-xl" style="max-width:1120px;width:95vw;">
+      <div class="modal-header">
+        <h3 id="projectIntroModalTitle">作品详细介绍</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('projectIntroModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" id="projectIntroModalBody" style="padding:12px 16px;"></div>
+    </div>
+  </div>
+
+  <!-- 模态弹窗12：使用图库图片选择器（供封面 / 背景图 / 手机背景 / CG 选图复用） -->
+  <div id="galleryAssetPickerModal" class="modal-overlay" style="display: none; z-index: 10060;" onclick="if(event.target===this)this.style.display='none'">
+    <div class="modal-card modal-lg" style="max-width:760px;width:94vw;">
+      <div class="modal-header">
+        <h3>选择图库图片</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('galleryAssetPickerModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" id="galleryAssetPickerBody" style="max-height:66vh;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- 兼容兜底弹窗 -->
+  <div id="simpleProjectCreateModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)this.style.display='none'">
+    <div class="modal-card" style="max-width:680px;width:92vw;">
+      <div class="modal-header">
+        <h3>新建企划</h3>
+        <button class="modal-close" type="button" onclick="document.getElementById('simpleProjectCreateModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div>
+          <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;">名称</label>
+          <input type="text" id="simpleProjNameInput" class="form-input" placeholder="企划名称" />
+        </div>
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <label style="font-size:12px;color:var(--text-muted);">提示词（可选，默认纯净 0 提示词）</label>
+          </div>
+          <textarea id="simpleProjPromptInput" class="form-textarea" rows="14" style="width:100%;font-size:13px;line-height:1.6;" placeholder="留空即为纯净 0 提示词；也可在此自由编写世界观、角色设定或规则..."></textarea>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px;">
+          <button type="button" class="btn btn-sm btn-secondary" onclick="document.getElementById('simpleProjectCreateModal').style.display='none'">取消</button>
+          <button type="button" class="btn btn-sm btn-primary" onclick="window.submitCreateSimpleProject && window.submitCreateSimpleProject()">创建</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 模态弹窗13：性能测试 ================= -->
+  <div id="benchmarkModal" class="modal-overlay" style="display: none; z-index: 10070;" onclick="if(event.target===this && !window._isBenchmarkRunning) window.closeBenchmarkModal && window.closeBenchmarkModal()">
+    <div class="modal-card modal-xl bench-modal-card" style="max-width: 1060px; width: 96vw;">
+      <div class="modal-header bench-modal-header">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <h3 style="margin:0;">性能测试</h3>
+          <span id="benchStateBadge" class="bench-state-badge">就绪</span>
+        </div>
+        <button class="modal-close" type="button" onclick="window.closeBenchmarkModal && window.closeBenchmarkModal()">✕</button>
+      </div>
+
+      <div class="modal-body bench-modal-body">
+        <div class="bench-control-bar">
+          <div class="bench-ctrl-field bench-ctrl-model">
+            <label for="benchModelSelect">模型</label>
+            <div style="display:flex;gap:6px;align-items:center;flex:1;min-width:0;">
+              <select id="benchModelSelect" class="form-select bench-select" onchange="window.syncBenchmarkModelPolicyUI && window.syncBenchmarkModelPolicyUI()"></select>
+              <button type="button" class="btn btn-xs btn-secondary" onclick="window.refreshBenchmarkModels && window.refreshBenchmarkModels()">刷新</button>
+            </div>
+          </div>
+          <div class="bench-ctrl-field bench-ctrl-mode">
+            <label for="benchModeSelect">模式</label>
+            <select id="benchModeSelect" class="form-select bench-select" onchange="window.syncBenchmarkModelPolicyUI && window.syncBenchmarkModelPolicyUI()">
+              <option value="quick">快速测试</option>
+              <option value="full">高压测试 (32K · 8192 · 60s)</option>
+            </select>
+          </div>
+          <div class="bench-ctrl-actions">
+            <button type="button" id="btnStartBenchmark" class="btn btn-primary bench-start-btn" onclick="window.startSystemBenchmark && window.startSystemBenchmark()">
+              开始
+            </button>
+            <button type="button" id="btnStopBenchmark" class="btn btn-secondary bench-stop-btn" style="display:none;" onclick="window.stopSystemBenchmark && window.stopSystemBenchmark()">
+              停止
+            </button>
+          </div>
+        </div>
+
+        <div class="bench-master-progress-wrap">
+          <div class="bench-master-progress-head">
+            <span id="benchCurrentStageTitle">就绪</span>
+            <strong id="benchMasterPct">0%</strong>
+          </div>
+          <div class="hot-update-progress-track" style="height:8px;">
+            <div id="benchMasterProgressFill" class="hot-update-progress-fill" style="width:0%;"></div>
+          </div>
+        </div>
+
+        <div class="bench-pc-specs-card" id="benchPcSpecsCard">
+          <div class="bench-pc-specs-head">
+            <strong>硬件配置</strong>
+            <span id="benchPcSpecsSourceHint" style="font-size:11px;color:var(--text-dim);"></span>
+          </div>
+          <div class="bench-pc-specs-grid">
+            <div class="bench-spec-item">
+              <span class="bench-spec-k">CPU</span>
+              <span class="bench-spec-v" id="benchSpecCpu">--</span>
+            </div>
+            <div class="bench-spec-item">
+              <span class="bench-spec-k">显卡</span>
+              <span class="bench-spec-v" id="benchSpecGpu">--</span>
+            </div>
+            <div class="bench-spec-item">
+              <span class="bench-spec-k">内存</span>
+              <span class="bench-spec-v" id="benchSpecRam">--</span>
+            </div>
+            <div class="bench-spec-item">
+              <span class="bench-spec-k">硬盘</span>
+              <span class="bench-spec-v" id="benchSpecDisk">--</span>
+            </div>
+            <div class="bench-spec-item">
+              <span class="bench-spec-k">主板</span>
+              <span class="bench-spec-v" id="benchSpecBoard">--</span>
+            </div>
+            <div class="bench-spec-item">
+              <span class="bench-spec-k">系统</span>
+              <span class="bench-spec-v" id="benchSpecOs">--</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="bench-hw-grid">
+          <div class="bench-hw-card">
+            <div class="bench-hw-top">
+              <span class="bench-hw-label">CPU</span>
+              <strong class="bench-hw-val" id="benchCpuLoadText">--%</strong>
+            </div>
+            <div class="bench-hw-title" id="benchCpuNameText">--</div>
+            <div class="bench-mini-bar"><div id="benchCpuBarFill" class="bench-mini-bar-fill" style="width:0%;"></div></div>
+            <div class="bench-hw-sub" id="benchCpuSubText">--</div>
+          </div>
+
+          <div class="bench-hw-card">
+            <div class="bench-hw-top">
+              <span class="bench-hw-label">内存</span>
+              <strong class="bench-hw-val" id="benchRamPctText">--%</strong>
+            </div>
+            <div class="bench-hw-title" id="benchRamTitleText">-- / -- GiB</div>
+            <div class="bench-mini-bar"><div id="benchRamBarFill" class="bench-mini-bar-fill" style="width:0%;"></div></div>
+            <div class="bench-hw-sub" id="benchRamSubText">--</div>
+          </div>
+
+          <div class="bench-hw-card bench-hw-gpu">
+            <div class="bench-hw-top">
+              <span class="bench-hw-label">显卡</span>
+              <strong class="bench-hw-val" id="benchGpuUtilText">--%</strong>
+            </div>
+            <div class="bench-hw-title" id="benchGpuNameText">--</div>
+            <div class="bench-mini-bar"><div id="benchGpuVramBarFill" class="bench-mini-bar-fill is-gpu" style="width:0%;"></div></div>
+            <div class="bench-hw-sub" id="benchGpuSubText">--</div>
+          </div>
+
+          <div class="bench-hw-card">
+            <div class="bench-hw-top">
+              <span class="bench-hw-label">磁盘</span>
+              <strong class="bench-hw-val" id="benchDiskSpeedText">--</strong>
+            </div>
+            <div class="bench-hw-title" id="benchDiskTitleText">--</div>
+            <div class="bench-mini-bar"><div id="benchDiskBarFill" class="bench-mini-bar-fill" style="width:0%;"></div></div>
+            <div class="bench-hw-sub" id="benchDiskSubText">顺序读取</div>
+          </div>
+        </div>
+
+        <div class="bench-kpi-grid">
+          <div class="bench-kpi-card">
+            <span class="bench-kpi-label">吐字速度</span>
+            <div class="bench-kpi-main"><strong id="benchKpiTps">--</strong><small>tok/s</small></div>
+            <div class="bench-kpi-sub" id="benchKpiTpsSub">峰值 -- · P95 --ms</div>
+          </div>
+          <div class="bench-kpi-card">
+            <span class="bench-kpi-label">首字延迟</span>
+            <div class="bench-kpi-main"><strong id="benchKpiTtft">--</strong><small>ms</small></div>
+            <div class="bench-kpi-sub" id="benchKpiTtftSub">长文 --ms</div>
+          </div>
+          <div class="bench-kpi-card">
+            <span class="bench-kpi-label">长文预填</span>
+            <div class="bench-kpi-main"><strong id="benchKpiPrefill">--</strong><small>tok/s</small></div>
+            <div class="bench-kpi-sub" id="benchKpiPrefillSub">大海捞针</div>
+          </div>
+          <div class="bench-kpi-card">
+            <span class="bench-kpi-label">协议检定</span>
+            <div class="bench-kpi-main"><strong id="benchKpiProto">--</strong><small>/ 100</small></div>
+            <div class="bench-kpi-sub" id="benchKpiProtoSub">投骰 · 状态 · 选项</div>
+          </div>
+        </div>
+
+        <div class="bench-chart-and-stages">
+          <div class="bench-chart-panel">
+            <div class="bench-panel-head">
+              <strong>速率与负载</strong>
+              <div class="bench-chart-legend">
+                <span class="legend-tps"><i></i>tok/s</span>
+                <span class="legend-gpu"><i></i>GPU %</span>
+              </div>
+            </div>
+            <div class="bench-svg-wrap">
+              <svg id="benchLiveChartSvg" viewBox="0 0 640 165" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="benchTpsGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#d4a65a" stop-opacity="0.38" />
+                    <stop offset="100%" stop-color="#d4a65a" stop-opacity="0.0" />
+                  </linearGradient>
+                </defs>
+                <line x1="0" y1="35" x2="640" y2="35" stroke="rgba(255,255,255,0.06)" stroke-dasharray="3,3" />
+                <line x1="0" y1="82" x2="640" y2="82" stroke="rgba(255,255,255,0.06)" stroke-dasharray="3,3" />
+                <line x1="0" y1="130" x2="640" y2="130" stroke="rgba(255,255,255,0.06)" stroke-dasharray="3,3" />
+                <path id="benchChartAreaPath" d="" fill="url(#benchTpsGrad)" />
+                <path id="benchChartTpsPath" d="" fill="none" stroke="#e8be72" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+                <path id="benchChartGpuPath" d="" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-dasharray="4,3" stroke-linecap="round" />
+              </svg>
+              <div id="benchChartEmptyHint" class="bench-chart-empty">等待测试</div>
+            </div>
+          </div>
+
+          <div class="bench-stages-panel">
+            <div class="bench-panel-head">
+              <strong>进度</strong>
+              <span id="benchElapsedTimer" style="font-size:11.5px;color:var(--text-dim);font-variant-numeric:tabular-nums;">0.0s</span>
+            </div>
+            <div id="benchStagesList" class="bench-stages-list">
+              <div class="bench-stage-row" data-stage="hardware">
+                <span class="bench-stage-dot">1</span>
+                <div class="bench-stage-info">
+                  <div class="bench-stage-name">硬件基准</div>
+                  <div class="bench-stage-desc">CPU · 内存 · 磁盘</div>
+                </div>
+              </div>
+              <div class="bench-stage-row" data-stage="ttft">
+                <span class="bench-stage-dot">2</span>
+                <div class="bench-stage-info">
+                  <div class="bench-stage-name">首字延迟</div>
+                  <div class="bench-stage-desc">短文响应</div>
+                </div>
+              </div>
+              <div class="bench-stage-row" data-stage="throughput">
+                <span class="bench-stage-dot">3</span>
+                <div class="bench-stage-info">
+                  <div class="bench-stage-name">持续吐字</div>
+                  <div class="bench-stage-desc">吞吐 · P95</div>
+                </div>
+              </div>
+              <div class="bench-stage-row" data-stage="prefill">
+                <span class="bench-stage-dot">4</span>
+                <div class="bench-stage-info">
+                  <div class="bench-stage-name">长文预填</div>
+                  <div class="bench-stage-desc">世界书 · 捞针</div>
+                </div>
+              </div>
+              <div class="bench-stage-row" data-stage="protocol">
+                <span class="bench-stage-dot">5</span>
+                <div class="bench-stage-info">
+                  <div class="bench-stage-name">协议检定</div>
+                  <div class="bench-stage-desc">投骰 · 状态 · 选项</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="benchReportCard" class="bench-report-card" style="display:none;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div class="bench-report-left">
+              <div class="bench-grade-ring" id="benchGradeRing">S</div>
+              <div>
+                <div class="bench-report-title" id="benchReportTitle">--</div>
+                <div class="bench-report-model" id="benchReportModelSub">--</div>
+              </div>
+            </div>
+            <button type="button" class="btn btn-xs btn-secondary" onclick="window.copyBenchmarkReport && window.copyBenchmarkReport()">复制报告</button>
+          </div>
+          <ul class="bench-report-tips" id="benchReportTips" style="display:none;"></ul>
+
+          <div id="benchRecParamsBox" class="bench-rec-params-box" style="display:none;">
+            <div class="bench-rec-head">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <strong>建议参数</strong>
+                <span id="benchRecProfileBadge" class="wb-badge" style="color:var(--primary, #e8be72);border-color:rgba(212,166,90,0.45);background:rgba(212,166,90,0.12);">96K</span>
+              </div>
+              <span id="benchRecStatusNote" style="font-size:11.5px;color:var(--text-muted);"></span>
+            </div>
+            <div id="benchRecDiffGrid" class="bench-rec-diff-grid"></div>
+            <div class="bench-rec-actions">
+              <label class="checkbox-label" style="font-size:12px;color:var(--text-muted);cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="benchChkAlsoSetModel" checked />
+                <span>设为默认模型</span>
+              </label>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:auto;">
+                <button type="button" id="btnSkipBenchRecParams" class="btn btn-sm btn-secondary" onclick="window.dismissBenchmarkRecommendedParams && window.dismissBenchmarkRecommendedParams()">
+                  忽略
+                </button>
+                <button type="button" id="btnApplyBenchRecParams" class="btn btn-sm btn-primary" style="font-weight:700;padding:6px 16px;" onclick="window.applyBenchmarkRecommendedParams && window.applyBenchmarkRecommendedParams()">
+                  应用
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bench-stream-monitor">
+          <div class="bench-panel-head" style="margin-bottom:6px;">
+            <strong>输出预览</strong>
+            <span id="benchStreamCounter" style="font-size:11.5px;color:var(--text-dim);">--</span>
+          </div>
+          <pre id="benchLiveStreamBox" class="bench-live-stream-box"></pre>
+        </div>
+
+        <div id="benchParallelStressSection" class="bench-parallel-section">
+          <div class="bench-parallel-head">
+            <div class="bench-parallel-title-row">
+              <strong style="font-size:14px;color:var(--text-main);">并行测试</strong>
+              <span class="bench-parallel-sub" id="benchParallelTheoryHint" style="margin:0;"></span>
+            </div>
+          </div>
+
+          <div class="bench-parallel-controls">
+            <div class="bench-par-ctrl-item">
+              <label for="benchParallelCountSelect">并行数</label>
+              <select id="benchParallelCountSelect" class="form-select bench-select">
+                <option value="1">1 路</option>
+                <option value="2">2 路</option>
+                <option value="3">3 路</option>
+                <option value="4" selected>4 路</option>
+                <option value="5">5 路</option>
+                <option value="6">6 路</option>
+                <option value="7">7 路</option>
+                <option value="8">8 路</option>
+                <option value="9">9 路</option>
+                <option value="10">10 路</option>
+                <option value="11">11 路</option>
+                <option value="12">12 路</option>
+                <option value="13">13 路</option>
+                <option value="14">14 路</option>
+                <option value="15">15 路</option>
+                <option value="16">16 路</option>
+              </select>
+            </div>
+
+            <div class="bench-par-ctrl-item">
+              <label for="benchParallelCtxSelect">上下文</label>
+              <select id="benchParallelCtxSelect" class="form-select bench-select">
+                <option value="16">16K</option>
+                <option value="32" selected>32K</option>
+                <option value="64">64K</option>
+              </select>
+            </div>
+
+            <div class="bench-par-ctrl-item">
+              <label for="benchParallelMaxTokSelect">单次输出</label>
+              <select id="benchParallelMaxTokSelect" class="form-select bench-select">
+                <option value="4096">4096</option>
+                <option value="8192" selected>8192</option>
+                <option value="16384">16384</option>
+              </select>
+            </div>
+
+            <div class="bench-par-ctrl-item">
+              <label for="benchParallelDurSelect">时长</label>
+              <select id="benchParallelDurSelect" class="form-select bench-select">
+                <option value="60" selected>60s</option>
+                <option value="120">120s</option>
+                <option value="180">180s</option>
+              </select>
+            </div>
+
+            <div class="bench-ctrl-actions" style="justify-content:flex-end;">
+              <button type="button" id="btnStartParallelBench" class="btn btn-secondary bench-start-btn" style="border-color:rgba(212,166,90,0.45);color:var(--primary,#e8be72);" onclick="window.startParallelStressBenchmark && window.startParallelStressBenchmark()">
+                开始并行
+              </button>
+              <button type="button" id="btnStopParallelBench" class="btn btn-danger bench-stop-btn" style="display:none;" onclick="window.stopSystemBenchmark && window.stopSystemBenchmark()">
+                停止
+              </button>
+            </div>
+          </div>
+
+          <div id="benchParallelLiveWrap" class="bench-par-live-wrap" style="display:none;">
+            <div class="bench-master-progress-wrap" style="padding:8px 12px;">
+              <div class="bench-master-progress-head">
+                <span id="benchParallelStageText">就绪</span>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <button type="button" id="btnCopyParallelReport" class="btn btn-xs btn-secondary" style="display:none;padding:2px 8px;font-size:11.5px;" onclick="window.copyBenchmarkReport && window.copyBenchmarkReport()">复制报告</button>
+                  <strong id="benchParallelPctText">0%</strong>
+                </div>
+              </div>
+              <div class="hot-update-progress-track" style="height:8px;">
+                <div id="benchParallelProgressFill" class="hot-update-progress-fill" style="width:0%;"></div>
+              </div>
+            </div>
+
+            <div class="bench-kpi-grid">
+              <div class="bench-kpi-card">
+                <span class="bench-kpi-label">总吞吐</span>
+                <div class="bench-kpi-main"><strong id="benchParAggTps">--</strong><small>tok/s</small></div>
+                <div class="bench-kpi-sub" id="benchParAggSub">峰值 -- tok/s</div>
+              </div>
+              <div class="bench-kpi-card">
+                <span class="bench-kpi-label">合计 Token</span>
+                <div class="bench-kpi-main"><strong id="benchParPerLaneTps">--</strong><small>tok</small></div>
+                <div class="bench-kpi-sub" id="benchParPerLaneSub">单路均速 -- tok/s</div>
+              </div>
+              <div class="bench-kpi-card">
+                <span class="bench-kpi-label">首字延迟</span>
+                <div class="bench-kpi-main"><strong id="benchParAvgTtft">--</strong><small>ms</small></div>
+                <div class="bench-kpi-sub" id="benchParTtftSub">最慢 -- ms</div>
+              </div>
+              <div class="bench-kpi-card">
+                <span class="bench-kpi-label">活跃通道</span>
+                <div class="bench-kpi-main"><strong id="benchParActiveLanes">--</strong><small>路</small></div>
+                <div class="bench-kpi-sub" id="benchParHealthSub">显存 -- GiB</div>
+              </div>
+            </div>
+
+            <div id="benchParallelLanesGrid" class="bench-par-lanes-grid"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 一键热更新实时进度浮窗 -->
+  <div id="hotUpdateFloatingCard" class="hot-update-floating-card" style="display: none;" role="status" aria-live="polite">
+    <div class="hot-update-head">
+      <div class="hot-update-title-wrap">
+        <span class="hot-update-dot-indicator" id="hotUpdateDotIndicator"></span>
+        <strong class="hot-update-title" id="hotUpdateCardTitle">一键热更新</strong>
+        <span class="hot-update-ver-pill" id="hotUpdateVerPill">alpha 1.6</span>
+      </div>
+      <div class="hot-update-head-right">
+        <span class="hot-update-pct" id="hotUpdatePctText">0%</span>
+        <button type="button" class="hot-update-close-btn" id="btnCloseHotUpdateCard" onclick="window.hideHotUpdateCard && window.hideHotUpdateCard()" title="关闭">✕</button>
+      </div>
+    </div>
+    <div class="hot-update-progress-track">
+      <div class="hot-update-progress-fill" id="hotUpdateProgressFill" style="width: 0%;"></div>
+    </div>
+    <div class="hot-update-stage-row">
+      <span class="hot-update-stage-text" id="hotUpdateStageText">正在直连检查最新版本...</span>
+      <div class="hot-update-actions" id="hotUpdateActions" style="display: none;"></div>
+    </div>
+  </div>
+
+  <script src="/static/i18n.js?v=30.6"></script>
+  <script src="/static/app.js?v=30.6"></script>
+  <script src="/static/enterprise.js?v=30.6"></script>
 </body>
 </html>
