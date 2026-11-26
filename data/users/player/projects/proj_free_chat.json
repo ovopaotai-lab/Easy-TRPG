@@ -1,12 +1,21 @@
 {
+  "schema_version": 2,
   "id": "proj_free_chat",
-  "name": "聊天",
-  "avatar": "",
+  "name": "自由聊天",
   "icon": "",
-  "description": "",
+  "avatar": "",
+  "description": "无规则、无状态栏的纯净对话与创作模式。",
+  "detailed_description": "",
+  "custom_css": "",
+  "quick_replies": [],
   "author": "Easy-TRPG",
   "category": "聊天",
+  "card_tier": "advanced",
   "tags": [],
+  "ruleset": "narrative",
+  "initial_state": {},
+  "bundled_cards": [],
+  "group_defaults": {},
   "system_prompt": "",
   "system_protocol_prompt": "",
   "prefix": "",
@@ -15,6 +24,8 @@
   "opening_statement": "",
   "suggested_questions": [],
   "prompt_variables": [],
+  "simple_mode": false,
+  "cot_enabled": true,
   "status_panel_enabled": false,
   "status_panel_template": "",
   "ui_modules": [],
@@ -26,9 +37,10 @@
     "地点与势力",
     "隐藏剧情触发"
   ],
-  "regex_replaces": [],
   "regex_scripts": [],
+  "regex_replaces": [],
   "cg_book": [],
+  "guided_meta": {},
   "memory_palace": [],
   "memory_type": "auto_summary",
   "max_context_turns": 96,
@@ -52,7 +64,8 @@
     "max_context_k": 96,
     "keep_recent_messages": 6,
     "worldbook_scan_depth": 5,
-    "thinking_budget": 1024
+    "thinking_budget": 1024,
+    "kv_cache_mode": "stable_chunked"
   },
   "appearance": {
     "bg_image": "",
@@ -61,42 +74,20 @@
     "chat_bubble_opacity": 0.92,
     "no_image_mode": false,
     "theme": "dark",
+    "custom_css": "",
     "tts_config": {
       "enabled": false,
       "voice_preset": "",
       "rate": 1.0,
-      "pitch": 1.0,
-      "emotion_vector": {
-        "happy": 0.4,
-        "angry": 0.0,
-        "sad": 0.0,
-        "fear": 0.0,
-        "hate": 0.0,
-        "love": 0.3,
-        "surprise": 0.1,
-        "neutral": 0.5
-      }
-    },
-    "theme_mode": "dark"
+      "pitch": 1.0
+    }
   },
   "tts_config": {
     "enabled": false,
     "voice_preset": "",
     "rate": 1.0,
-    "pitch": 1.0,
-    "emotion_vector": {
-      "happy": 0.4,
-      "angry": 0.0,
-      "sad": 0.0,
-      "fear": 0.0,
-      "hate": 0.0,
-      "love": 0.3,
-      "surprise": 0.1,
-      "neutral": 0.5
-    }
+    "pitch": 1.0
   },
-  "created_at": 1729600000.0,
-  "updated_at": 1729600000.0,
-  "cot_enabled": true,
-  "simple_mode": false
+  "created_at": 1795622074.4000294,
+  "updated_at": 1795622074.4000294
 }

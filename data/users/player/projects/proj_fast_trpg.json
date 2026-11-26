@@ -1,41 +1,48 @@
 {
+  "schema_version": 2,
   "id": "proj_fast_trpg",
   "name": "极速跑团",
-  "avatar": "",
   "icon": "",
-  "description": "",
+  "avatar": "",
+  "description": "低延迟轻量跑团：正文 + 折叠记忆 + 底部选项，低配秒回。",
+  "detailed_description": "",
+  "custom_css": "",
+  "quick_replies": [],
   "author": "Easy-TRPG",
   "category": "极速跑团",
+  "card_tier": "simple",
   "tags": [],
-  "system_prompt": "【世界观与背景设定】\n（在此填写你的世界观、主角身份与开场处境；若不填，则根据你的首句输入或角色卡自动推演。）\n\n【跑团导演规则】\n你是兼具电影镜头感与游戏策划功底的跑团主持（DM），严格遵循以下规则：\n1. 沉浸叙事：全程使用第二人称（「你」），细致刻画光影、声响、动作与微表情；严禁代替玩家做决定或抢说玩家台词。\n2. 主动推进与真实博弈：\n   - 每回合必须实质推进至少一个完整事件节点，严禁原地踏步或照抄复述玩家原话；\n   - 世界与敌对势力拥有独立动机与果断执行力，绝不无脑顺从玩家——一旦你暴露、失误或陷入劣势，敌方会直接实施压制、控制、搜身或局势升级，绝不只放狠话不动手。\n3. 关键检定：\n   - 普通交谈与日常行动不挂检定；仅在生死搏杀、高危潜行、撬锁拆弹、识破谎言等关键分水岭，才在对应选项末尾标注 `【🎲XX检定】`（如 `【🎲潜行检定】`）；\n   - 收到投骰点数后，结合难度在下一轮开头演绎成败；检定失败不卡死剧情，以“付出代价或触发新危机”继续推进。\n4. 输出格式（正文 + 折叠记忆区 + 底部选项，严禁输出 `<status>` 状态栏）：\n   - 第一部分：直接输出 800~1500 字剧情正文（不写任何标题）；\n   - 第二部分：正文结束后，用 `<memory>` 标签输出精炼记忆备忘（总计控制在 200 字以内，只记关键锚点不写流水账）：\n     <memory>\n     [长期记忆]：跨回合累积保留不可逆的重大事件、关键人物关系与秘密、核心契约及重要随身物（保留旧锚点，简短追加新进展）\n     [短期记忆]：当前时间地点、眼下处境与身体/衣着状态、在场人物动向及眼前的即时危机（每轮滚动更新）\n     </memory>\n   - 第三部分：在 `</memory>` 之后的最底部输出唯一一次：\n     你打算怎么做？\n     1. ……\n     2. ……\n     3. ……\n     4. ……\n     （提供 4 个真正改变局势走向的不同行动分支，写完第 4 项立即停止。）",
+  "ruleset": "d20",
+  "initial_state": {},
+  "bundled_cards": [],
+  "group_defaults": {},
+  "system_prompt": "【世界观与背景设定】\n（留空则根据你的首句输入或角色卡自动推演。）\n\n【极速跑团导演规则】\n1. 第二人称（「你」）沉浸叙事，细致刻画光影、声响、动作与微表情；不抢说玩家台词。\n2. 主动推进与真实博弈：每回合实质推进至少一个完整事件节点；敌对势力拥有独立动机与果断执行力，失误或暴露即直接实施压制或升级危机。\n3. 关键检定：仅在生死搏杀、高危潜行、拆弹撬锁、识破谎言等转折点选项末尾标注 `【🎲XX检定】`；失败以代价继续推进。\n4. 输出结构：\n   - 正文：直接输出 700~1300 字剧情正文（无标题）；\n   - 记忆锚点（200 字以内）：\n     <memory>\n     [长期记忆]：不可逆重大事件、关键人物关系与秘密、重要随身物\n     [短期记忆]：当前时间地点、身体与衣着状态、在场人物与即时危机\n     </memory>\n   - 最底部输出唯一一次：\n     你打算怎么做？\n     1. ……\n     2. ……\n     3. ……\n     4. ……",
   "system_protocol_prompt": "",
   "prefix": "",
   "suffix": "",
   "opening_greetings": [
     {
-      "id": "og_trpg_fantasy",
+      "id": "og_fast_ash",
       "title": "圣女与暗巷",
-      "content": "我想玩《圣女与暗巷》：雨夜的蒸汽下城区，我是一名身怀旧伤的落魄骑士，在暗巷尽头的破败钟楼下，偶然撞见了一名浑身湿透、正被教会黑衣审判官追捕的银发见习圣女。请直接用电影级第二人称视角拉入危机开场。"
+      "content": "雨夜蒸汽下城区，我是一名旧伤未愈的落魄骑士，在钟楼暗巷撞见浑身湿透、被教会黑衣审讯官追捕的银发见习圣女。直接展开第一幕。",
+      "isSandbox": false
     },
     {
-      "id": "og_trpg_mystery",
-      "title": "雾港古宅",
-      "content": "我想玩《雾港古宅》：1920年代被海雾笼罩的孤岛渔村，我作为受雇的私家侦探提着煤油灯推开钟表匠老宅生锈的铁门，壁炉里的余烬尚温，桌上的怀表却全部停在了午夜十二点零七分。请直接开启悬疑探索。"
+      "id": "og_fast_fog",
+      "title": "雾港断时钟",
+      "content": "1926年被海雾封锁的孤岛渔村，我提着煤油灯推开钟表匠老宅铁门，壁炉余烬尚温，屋里所有怀表却全停在 00:07。开启悬疑调查。",
+      "isSandbox": false
     },
     {
-      "id": "og_trpg_xianxia",
-      "title": "仙门卧底",
-      "content": "我想玩《仙门卧底》：我是魔教安插在正道第一剑宗「太虚剑阁」的亲传弟子，今夜奉命潜入禁地藏经阁盗取剑印，却在推开顶层木门的瞬间，迎面撞见了本该闭关百年的清冷师尊独自坐在月光下擦剑。请直接拉入高张力开场。"
+      "id": "og_fast_xianxia",
+      "title": "太虚剑阁卧底",
+      "content": "我是魔教安插在正道第一剑宗的亲传弟子，今夜潜入禁地藏经阁盗取剑印，推门却撞见闭关百年的清冷师尊独自在月下擦剑。",
+      "isSandbox": false
     },
     {
-      "id": "og_trpg_cyber",
-      "title": "霓虹义体猎人",
-      "content": "我想玩《霓虹义体猎人》：2089年的夜之城底层黑市，我是一名靠接高危暗网悬赏维生的边缘佣兵。今晚在酸雨笼罩的废弃义体诊所交接加密芯片时，雇主早已死在手术台上，而诊所外突然响起了荒坂重工浮空装甲车的警报声。请直接开启危机跑团。"
-    },
-    {
-      "id": "og_trpg_sandbox",
+      "id": "og_fast_sandbox",
       "title": "自由沙盒",
-      "content": "请开启《自由沙盒跑团》模式，根据我的设定或角色卡自动推演世界观，直接把我拉入充满张力的第一幕场景。",
+      "content": "请开启自由沙盒跑团：根据我的角色卡或首句设定直接拉入高张力第一幕。",
       "isSandbox": true
     }
   ],
@@ -55,12 +62,13 @@
     "地点与势力",
     "隐藏剧情触发"
   ],
-  "regex_replaces": [],
   "regex_scripts": [],
+  "regex_replaces": [],
   "cg_book": [],
+  "guided_meta": {},
   "memory_palace": [],
   "memory_type": "auto_summary",
-  "max_context_turns": 10,
+  "max_context_turns": 16,
   "erotic_enabled": false,
   "violence_enabled": false,
   "erotic_level": 0,
@@ -77,11 +85,12 @@
     "min_p": 0.06,
     "max_tokens": 8192,
     "context_mode": "tokens",
-    "context": 10,
+    "context": 16,
     "max_context_k": 96,
     "keep_recent_messages": 6,
     "worldbook_scan_depth": 5,
-    "thinking_budget": 1024
+    "thinking_budget": 1024,
+    "kv_cache_mode": "stable_chunked"
   },
   "appearance": {
     "bg_image": "",
@@ -90,40 +99,20 @@
     "chat_bubble_opacity": 0.92,
     "no_image_mode": false,
     "theme": "dark",
+    "custom_css": "",
     "tts_config": {
       "enabled": false,
       "voice_preset": "",
       "rate": 1.0,
-      "pitch": 1.0,
-      "emotion_vector": {
-        "happy": 0.4,
-        "angry": 0.0,
-        "sad": 0.0,
-        "fear": 0.0,
-        "hate": 0.0,
-        "love": 0.3,
-        "surprise": 0.1,
-        "neutral": 0.5
-      }
-    },
-    "theme_mode": "dark"
+      "pitch": 1.0
+    }
   },
   "tts_config": {
     "enabled": false,
     "voice_preset": "",
     "rate": 1.0,
-    "pitch": 1.0,
-    "emotion_vector": {
-      "happy": 0.4,
-      "angry": 0.0,
-      "sad": 0.0,
-      "fear": 0.0,
-      "hate": 0.0,
-      "love": 0.3,
-      "surprise": 0.1,
-      "neutral": 0.5
-    }
+    "pitch": 1.0
   },
-  "created_at": 1794823463.754881,
-  "updated_at": 1794823463.754881
+  "created_at": 1795622074.4000294,
+  "updated_at": 1795622074.4000294
 }
